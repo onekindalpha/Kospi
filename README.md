@@ -2,7 +2,6 @@
 
 KOSPI breadth data repository based on the market breadth interpretation style from  
 **Stan Weinstein, _Secrets for Profiting in Bull and Bear Markets_**  
-(국내 번역: **주식투자 최적의 타이밍을 잡는 법**)
 
 ## Purpose
 This repository stores daily KOSPI breadth data used to analyze:
