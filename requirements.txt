@@ -1,6 +1,6 @@
-streamlit
-pandas
-requests
-finance-datareader
-matplotlib
-mplfinance
+streamlit==1.43.2
+pandas==2.2.3
+requests==2.32.3
+finance-datareader==0.9.50
+matplotlib==3.9.4
+mplfinance==0.12.10b0
