@@ -1,0 +1,175 @@
+//@version=6
+indicator("US Breadth A/D v12 KR", overlay=false, max_labels_count=500)
+
+// ──────────────────────────────────────────
+// 입력값
+// ──────────────────────────────────────────
+market        = input.string("NYSE", "Market", options=["NYSE", "NASDAQ"])
+tfBreadth     = input.timeframe("D", "Breadth timeframe")
+lookback      = input.int(126, "Lookback (일)", minval=20)
+baseValue     = input.float(50000, "A/D Line Base Value")
+nearHighPct   = input.float(2.0,  "고점 근접 기준 %",  step=0.1)
+warnGapPct    = input.float(1.0,  "경고 괴리 기준 %",  step=0.1)
+dangerGapPct  = input.float(2.0,  "위험 괴리 기준 %",  step=0.1)
+newHighTolPct = input.float(0.2,  "신고점 허용 오차 %", step=0.1)
+
+// ──────────────────────────────────────────
+// 데이터 수신
+// ──────────────────────────────────────────
+string advSym  = market == "NYSE" ? "USI:ADV"     : "USI:ADVQ"
+string declSym = market == "NYSE" ? "USI:DECL"    : "USI:DECL.NQ"
+
+adv  = request.security(advSym,  tfBreadth, close, gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_off, ignore_invalid_symbol=true)
+decl = request.security(declSym, tfBreadth, close, gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_off, ignore_invalid_symbol=true)
+
+adDiff    = nz(adv, 0) - nz(decl, 0)
+adLineRaw = baseValue + ta.cum(adDiff)
+
+// ──────────────────────────────────────────
+// 리베이스 (시각화용)
+// ──────────────────────────────────────────
+adBase     = nz(adLineRaw[lookback], adLineRaw)
+adLinePlot = adBase != 0 ? 100.0 * adLineRaw / adBase : na
+
+// ──────────────────────────────────────────
+// 고점 계산 (가격 고점일 기준으로 통일)
+// ──────────────────────────────────────────
+priceHigh        = ta.highest(close, lookback)
+priceHighDaysAgo = -ta.highestbars(close, lookback)  // 가격 고점: 몇 일전
+
+// 표시용 문자열 ("오늘" vs "N일전")
+priceHighDaysStr = priceHighDaysAgo == 0 ? "오늘" : str.tostring(priceHighDaysAgo) + "일전"
+
+// ★ A/D선도 가격 고점 당일 값을 기준으로 비교 (날짜 통일)
+adOnPeakDay = adLineRaw[priceHighDaysAgo]
+
+// 고점(같은 날) 대비 변화율 — 직관적 부호
+// + : 고점보다 위 (개선/상승)  /  - : 고점보다 아래 (하락/악화)
+priceOff = priceHigh   != 0 ? (close      - priceHigh)    / math.abs(priceHigh)    * 100.0 : na
+adOff    = adOnPeakDay != 0 ? (adLineRaw  - adOnPeakDay)  / math.abs(adOnPeakDay)  * 100.0 : na
+
+// lagGap = adOff - priceOff
+// + : A/D가 가격보다 앞서는 중 (브레드스 선행, 긍정)
+// - : A/D가 가격보다 뒤처지는 중 (브레드스 지연, 경고)
+lagGap = adOff - priceOff
+
+priceAtHigh = priceOff >= -newHighTolPct   // 가격이 고점의 0.2% 이내
+adAtHigh    = adOff    >= -newHighTolPct   // A/D가 고점일 수준의 0.2% 이내
+priceNear   = priceOff >= -nearHighPct     // 가격이 고점의 2% 이내
+
+// ──────────────────────────────────────────
+// 판정 로직
+// ──────────────────────────────────────────
+string status      = "중립"
+string note        = ""
+color  statusColor = color.gray
+
+if na(priceOff) or na(adOff)
+    status      := "신호 없음"
+    note        := "히스토리 부족 — 데이터 대기 중"
+    statusColor := color.gray
+
+else if priceAtHigh and adAtHigh
+    status      := "✅ 상승 확인"
+    note        := priceHighDaysStr + " 고점 기준 — 가격 " + str.tostring(priceOff, "#.##") + "% / A/D선 " + str.tostring(adOff, "#.##") + "% (동행)"
+    statusColor := color.green
+
+else if priceAtHigh and not adAtHigh and lagGap <= -dangerGapPct
+    status      := "🔴 심각한 A/D 미확인"
+    note        := priceHighDaysStr + " 고점 기준 — 가격 " + str.tostring(priceOff, "#.##") + "% / A/D선 " + str.tostring(adOff, "#.##") + "% (괴리 " + str.tostring(lagGap, "#.##") + "%)"
+    statusColor := color.red
+
+else if priceAtHigh and not adAtHigh and lagGap <= -warnGapPct
+    status      := "🟠 A/D 초기 경고"
+    note        := priceHighDaysStr + " 고점 기준 — 가격 " + str.tostring(priceOff, "#.##") + "% / A/D선 " + str.tostring(adOff, "#.##") + "% (괴리 " + str.tostring(lagGap, "#.##") + "%)"
+    statusColor := color.orange
+
+else if priceNear and lagGap <= -dangerGapPct
+    status      := "🔴 브레드스 심각 지연"
+    note        := priceHighDaysStr + " 고점 기준 — 가격 " + str.tostring(priceOff, "#.##") + "% / A/D선 " + str.tostring(adOff, "#.##") + "% (괴리 " + str.tostring(lagGap, "#.##") + "%)"
+    statusColor := color.red
+
+else if priceNear and lagGap <= -warnGapPct
+    status      := "🟠 브레드스 소폭 지연"
+    note        := priceHighDaysStr + " 고점 기준 — 가격 " + str.tostring(priceOff, "#.##") + "% / A/D선 " + str.tostring(adOff, "#.##") + "% (괴리 " + str.tostring(lagGap, "#.##") + "%)"
+    statusColor := color.orange
+
+else if lagGap >= warnGapPct
+    status      := "🟢 브레드스 선행"
+    note        := priceHighDaysStr + " 고점 기준 — 가격 " + str.tostring(priceOff, "#.##") + "% / A/D선 " + str.tostring(adOff, "#.##") + "% (A/D 가격보다 " + str.tostring(lagGap, "#.##") + "% 앞서는 중)"
+    statusColor := color.teal
+
+else if adOff >= -nearHighPct and priceOff < -nearHighPct
+    status      := "🟢 브레드스 강세"
+    note        := priceHighDaysStr + " 고점 기준 — 가격 " + str.tostring(priceOff, "#.##") + "% / A/D선 " + str.tostring(adOff, "#.##") + "% (A/D 고점 수준 유지)"
+    statusColor := color.teal
+
+else
+    status      := "중립"
+    note        := priceHighDaysStr + " 고점 기준 — 가격 " + str.tostring(priceOff, "#.##") + "% / A/D선 " + str.tostring(adOff, "#.##") + "% (괴리 " + str.tostring(lagGap, "#.##") + "%)"
+    statusColor := color.gray
+
+// ──────────────────────────────────────────
+// 플롯
+// ──────────────────────────────────────────
+plot(adLinePlot, "A/D Line (리베이스)", color=color.new(color.blue, 0), linewidth=3)
+hline(100, "기준선", color=color.new(color.gray, 75))
+
+bgcolor(
+  (status == "🔴 심각한 A/D 미확인" or status == "🔴 브레드스 심각 지연") ? color.new(color.red,    90) :
+  (status == "🟠 A/D 초기 경고"     or status == "🟠 브레드스 소폭 지연") ? color.new(color.orange, 90) :
+  (status == "✅ 상승 확인")                                                ? color.new(color.green,  92) : na)
+
+// ──────────────────────────────────────────
+// 우측 상단 테이블
+// ──────────────────────────────────────────
+var table t = table.new(position.top_right, 2, 9, border_width=1)
+if barstate.islast
+    table.cell(t, 0, 0, "마켓",          bgcolor=color.new(color.gray, 80))
+    table.cell(t, 1, 0, market)
+    table.cell(t, 0, 1, "AD 차이 (오늘)", bgcolor=color.new(color.gray, 80))
+    table.cell(t, 1, 1, str.tostring(adDiff, format.mintick))
+    table.cell(t, 0, 2, "기준 고점 시점",  bgcolor=color.new(color.gray, 80))
+    table.cell(t, 1, 2, priceHighDaysStr)
+    table.cell(t, 0, 3, "A/D선 (고점일↔오늘)", bgcolor=color.new(color.gray, 80))
+    table.cell(t, 1, 3, str.tostring(adOff, "#.##") + "%")
+    table.cell(t, 0, 4, "가격 (고점일↔오늘)", bgcolor=color.new(color.gray, 80))
+    table.cell(t, 1, 4, str.tostring(priceOff, "#.##") + "%")
+    table.cell(t, 0, 5, "",                   bgcolor=color.new(color.gray, 80))
+    table.cell(t, 1, 5, "")
+    table.cell(t, 0, 6, "괴리 (A/D-가격)",  bgcolor=color.new(color.gray, 80))
+    table.cell(t, 1, 6, str.tostring(lagGap, "#.##") + "%",
+      text_color = lagGap <= -dangerGapPct ? color.red :
+                   lagGap <= -warnGapPct   ? color.orange :
+                   lagGap >= warnGapPct    ? color.teal : color.gray)
+    table.cell(t, 0, 7, "판정",            bgcolor=color.new(color.gray, 80))
+    table.cell(t, 1, 7, status, text_color=statusColor)
+    table.cell(t, 0, 8, "설명",            bgcolor=color.new(color.gray, 80))
+    table.cell(t, 1, 8, note,              text_color=statusColor)
+
+// ──────────────────────────────────────────
+// 차트 라벨 (최신 바 오른쪽)
+// ──────────────────────────────────────────
+var label lbl = na
+if barstate.islast
+    if not na(lbl)
+        label.delete(lbl)
+    lbl := label.new(
+      bar_index, adLinePlot,
+      status + "\n" + note,
+      style=label.style_label_left,
+      color=statusColor,
+      textcolor=color.white,
+      size=size.normal)
+
+// ──────────────────────────────────────────
+// 알림
+// ──────────────────────────────────────────
+alertcondition(status == "✅ 상승 확인",
+  title="상승 확인", message="가격·A/D선 모두 고점 돌파 확인")
+alertcondition(status == "🟠 A/D 초기 경고",
+  title="A/D 초기 경고", message="가격 고점이나 A/D선 미확인")
+alertcondition(status == "🔴 심각한 A/D 미확인" or status == "🔴 브레드스 심각 지연",
+  title="브레드스 심각 경고", message="가격 강세를 브레드스가 뒷받침하지 못함")
+alertcondition(status == "🟢 브레드스 선행" or status == "🟢 브레드스 강세",
+  title="브레드스 선행", message="A/D선이 가격보다 앞서는 중 — 잠재적 상승 신호")
