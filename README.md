@@ -3,6 +3,9 @@
 KOSPI breadth data repository based on the market breadth interpretation style from  
 **Stan Weinstein, _Secrets for Profiting in Bull and Bear Markets_**  
 
+## 🚀 Live Demo
+[https://onekindalpha-kospi-xxx.streamlit.app](https://onekindalpha-kospi-xxx.streamlit.app)
+
 ## Purpose
 This repository stores daily KOSPI breadth data used to analyze:
 
