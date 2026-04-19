@@ -1,0 +1,334 @@
+//@version=6
+indicator("US Breadth A/D v14 KR", overlay=false, max_labels_count=500, max_lines_count=500)
+
+// ══════════════════════════════════════════════════════
+// 입력값
+// ══════════════════════════════════════════════════════
+market    = input.string("NYSE",  "Market", options=["NYSE","NASDAQ"])
+tfBreadth = input.timeframe("D",  "Breadth timeframe",
+              tooltip="일봉 차트 → D / 주봉 차트 → W")
+baseValue = input.float(50000,    "A/D Line Base Value")
+lookback  = input.int(60,         "고점/저점 탐색 기간 (바 수)", minval=10, maxval=300,
+              tooltip="일봉: 126=6개월 / 주봉: 26=6개월")
+pivotLen  = input.int(5,          "피벗 확인 길이 (좌우 바 수)", minval=2, maxval=20,
+              tooltip="일봉: 10 / 주봉: 3~5 권장")
+
+// 가격 오버레이 표시 여부
+showPrice    = input.bool(true, "가격 곡선 A/D 패널에 겹쳐 표시",
+                tooltip="책처럼 지수와 A/D를 같은 패널에서 비교")
+showDivLines = input.bool(true, "불일치 연결선 표시 (수평 기준선)")
+
+// 임계값
+warnPct   = input.float(0.5, "주의 기준 %",  step=0.1, minval=0.0)
+dangerPct = input.float(2.0, "위험 기준 %",  step=0.1, minval=0.0)
+
+// ══════════════════════════════════════════════════════
+// 브레드스 데이터
+// ══════════════════════════════════════════════════════
+string advSym  = market == "NYSE" ? "USI:ADV"      : "USI:ADVQ"
+string declSym = market == "NYSE" ? "USI:DECL"     : "USI:DECL.NQ"
+
+adv  = request.security(advSym,  tfBreadth, close,
+       gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_off, ignore_invalid_symbol=true)
+decl = request.security(declSym, tfBreadth, close,
+       gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_off, ignore_invalid_symbol=true)
+
+adDiff    = nz(adv, 0) - nz(decl, 0)
+adLineRaw = baseValue + ta.cum(adDiff)
+
+// ══════════════════════════════════════════════════════
+// 가격을 A/D 스케일로 정규화
+// ══════════════════════════════════════════════════════
+priceMin = ta.lowest(close,      lookback * 2)
+priceMax = ta.highest(close,     lookback * 2)
+adMin    = ta.lowest(adLineRaw,  lookback * 2)
+adMax    = ta.highest(adLineRaw, lookback * 2)
+
+priceMapped = (priceMax != priceMin) ?
+              adMin + (close - priceMin) / (priceMax - priceMin) * (adMax - adMin) : adLineRaw
+
+// ══════════════════════════════════════════════════════
+// ① 라이브 불일치 감지
+// ══════════════════════════════════════════════════════
+priceHighRecent = ta.highest(close, lookback)
+priceHighPrev   = ta.highest(close[lookback], lookback)
+barsAgoHighPrev = lookback + (-ta.highestbars(close[lookback], lookback))
+adAtPrev        = adLineRaw[barsAgoHighPrev]
+
+priceLowRecent  = ta.lowest(close, lookback)
+priceLowPrev    = ta.lowest(close[lookback], lookback)
+barsAgoLowPrev  = lookback + (-ta.lowestbars(close[lookback], lookback))
+adAtLowPrev     = adLineRaw[barsAgoLowPrev]
+
+// 부정적 불일치: 가격은 직전 고점 갱신, A/D는 그때보다 낮음
+bearDivLive    = close > priceHighPrev and adLineRaw < adAtPrev
+bearDivLivePct = adAtPrev != 0 ? (adAtPrev - adLineRaw) / math.abs(adAtPrev) * 100 : 0.0
+
+// 긍정적 불일치: 가격은 이전 저점 부근/하향 테스트, A/D는 그때보다 덜 약함
+bullPriceTest   = close <= priceLowPrev * 1.03
+bullDivLive     = bullPriceTest and adLineRaw > adAtLowPrev
+bullDivLivePct  = adAtLowPrev != 0 ? (adLineRaw - adAtLowPrev) / math.abs(adAtLowPrev) * 100 : 0.0
+
+// ══════════════════════════════════════════════════════
+// ② 피벗 기반 감지
+// ══════════════════════════════════════════════════════
+priceHigh = ta.pivothigh(close, pivotLen, pivotLen)
+priceLow  = ta.pivotlow(close, pivotLen, pivotLen)
+
+var float priceH1    = na
+var float priceH2    = na
+var float adAtH1     = na
+var float adAtH2     = na
+var int   priceH1Bar = na
+var int   priceH2Bar = na
+
+if not na(priceHigh)
+    priceH2    := priceH1
+    adAtH2     := adAtH1
+    priceH2Bar := priceH1Bar
+    priceH1    := priceHigh
+    adAtH1     := adLineRaw[pivotLen]
+    priceH1Bar := bar_index - pivotLen
+
+var float priceL1    = na
+var float priceL2    = na
+var float adAtL1     = na
+var float adAtL2     = na
+var int   priceL1Bar = na
+var int   priceL2Bar = na
+
+if not na(priceLow)
+    priceL2    := priceL1
+    adAtL2     := adAtL1
+    priceL2Bar := priceL1Bar
+    priceL1    := priceLow
+    adAtL1     := adLineRaw[pivotLen]
+    priceL1Bar := bar_index - pivotLen
+
+// Bearish pivot divergence: 가격 고점 상승, A/D 고점 하락
+bearDivPivot = not na(priceH1) and not na(priceH2) and
+               not na(adAtH1)  and not na(adAtH2)  and
+               priceH1 > priceH2 and adAtH1 < adAtH2
+
+// Bullish pivot divergence: 가격 저점 하락, A/D 저점 상승
+bullDivPivot = not na(priceL1) and not na(priceL2) and
+               not na(adAtL1)  and not na(adAtL2)  and
+               priceL1 < priceL2 and adAtL1 > adAtL2
+
+// ══════════════════════════════════════════════════════
+// ③ 피벗 고점/저점 연결선
+// ══════════════════════════════════════════════════════
+var line lineH = na
+var line lineL = na
+
+if showDivLines and not na(priceHigh) and not na(priceH1) and not na(priceH2)
+    if not na(lineH)
+        line.delete(lineH)
+    lineColorH = adAtH1 < adAtH2 ? color.new(color.red, 20) : color.new(color.teal, 40)
+    lineH := line.new(
+      priceH2Bar, adAtH2,
+      priceH1Bar, adAtH1,
+      color=lineColorH, width=2, style=line.style_dashed,
+      extend=extend.right)
+
+if showDivLines and not na(priceLow) and not na(priceL1) and not na(priceL2)
+    if not na(lineL)
+        line.delete(lineL)
+    lineColorL = adAtL1 > adAtL2 ? color.new(color.teal, 20) : color.new(color.orange, 40)
+    lineL := line.new(
+      priceL2Bar, adAtL2,
+      priceL1Bar, adAtL1,
+      color=lineColorL, width=2, style=line.style_dashed,
+      extend=extend.right)
+
+// ══════════════════════════════════════════════════════
+// 판정
+// ══════════════════════════════════════════════════════
+string status      = "중립"
+string note        = ""
+color  statusColor = color.gray
+
+if bearDivLive and bearDivLivePct >= dangerPct
+    status      := "🔴 부정적 불일치 (위험)"
+    note        := str.tostring(barsAgoHighPrev) + "바전 고점 대비 A/D " + str.tostring(bearDivLivePct, "#.##") + "% 뒤처짐"
+    statusColor := color.red
+
+else if bearDivLive and bearDivLivePct >= warnPct
+    status      := "🟠 부정적 불일치 (주의)"
+    note        := str.tostring(barsAgoHighPrev) + "바전 고점 대비 A/D " + str.tostring(bearDivLivePct, "#.##") + "% 뒤처짐"
+    statusColor := color.orange
+
+else if bearDivLive
+    status      := "🟡 초기 부정적 불일치"
+    note        := str.tostring(barsAgoHighPrev) + "바전 고점 대비 A/D 소폭 뒤처짐"
+    statusColor := color.yellow
+
+else if bullDivLive and bullDivLivePct >= warnPct
+    status      := "🟢 긍정적 불일치 (바닥 신호)"
+    note        := str.tostring(barsAgoLowPrev) + "바전 저점 대비 A/D " + str.tostring(bullDivLivePct, "#.##") + "% 개선"
+    statusColor := color.teal
+
+else if bullDivLive
+    status      := "🔵 초기 긍정적 불일치"
+    note        := str.tostring(barsAgoLowPrev) + "바전 저점 대비 A/D가 덜 약함"
+    statusColor := color.aqua
+
+else if bearDivPivot
+    status      := "🟠 피벗 부정적 불일치 확인"
+    note        := "지수 고점 상승 / 고점일 A/D 하락 (피벗 확인)"
+    statusColor := color.orange
+
+else if bullDivPivot
+    status      := "🔵 피벗 긍정적 불일치 확인"
+    note        := "지수 저점 하락 / 저점일 A/D 상승 (피벗 확인)"
+    statusColor := color.blue
+
+else
+    status      := "중립"
+    note        := "불일치 없음"
+    statusColor := color.gray
+
+// ══════════════════════════════════════════════════════
+// 플롯
+// ══════════════════════════════════════════════════════
+plot(adLineRaw, "A/D Line", color=color.new(color.blue, 0), linewidth=2)
+
+plot(showPrice ? priceMapped : na, "지수 가격 (스케일 조정)",
+     color=color.new(color.gray, 40), linewidth=1, style=plot.style_line)
+
+plot(bearDivLive ? adAtPrev    : na, "H_b일 A/D 기준",
+     color=color.new(color.red,  30), linewidth=1, style=plot.style_linebr)
+plot(bullDivLive ? adAtLowPrev : na, "L_b일 A/D 기준",
+     color=color.new(color.teal, 30), linewidth=1, style=plot.style_linebr)
+
+bgcolor(
+  (status == "🔴 부정적 불일치 (위험)")      ? color.new(color.red,    85) :
+  (status == "🟠 부정적 불일치 (주의)")      ? color.new(color.orange, 88) :
+  (status == "🟡 초기 부정적 불일치")        ? color.new(color.yellow, 92) :
+  (status == "🟢 긍정적 불일치 (바닥 신호)") ? color.new(color.teal,   88) :
+  (status == "🔵 초기 긍정적 불일치")        ? color.new(color.aqua,   90) :
+  (status == "🟠 피벗 부정적 불일치 확인")   ? color.new(color.orange, 92) :
+  (status == "🔵 피벗 긍정적 불일치 확인")   ? color.new(color.blue,   92) : na)
+
+// ══════════════════════════════════════════════════════
+// 피벗 라벨
+// ══════════════════════════════════════════════════════
+var label lblH1 = na
+var label lblH2 = na
+var label lblL1 = na
+var label lblL2 = na
+
+if not na(priceHigh)
+    adValH = adLineRaw[pivotLen]
+    oldAdH1 = adAtH1
+    oldAdH2 = adAtH2
+
+    if not na(lblH1)
+        isDivH = not na(oldAdH1) and not na(oldAdH2) and oldAdH1 < oldAdH2
+        label.set_text(lblH1, "H_b\n" + str.tostring(oldAdH1, "#"))
+        label.set_color(lblH1, isDivH ? color.new(color.red, 30) : color.new(color.gray, 30))
+
+    if not na(lblH2)
+        label.delete(lblH2)
+
+    lblH2 := lblH1
+    lblH1 := label.new(
+      bar_index - pivotLen, adValH,
+      "H_a\n" + str.tostring(adValH, "#"),
+      style=label.style_label_down,
+      color=color.new(color.red, 10), textcolor=color.white, size=size.small)
+
+if not na(priceLow)
+    adValL = adLineRaw[pivotLen]
+    oldAdL1 = adAtL1
+    oldAdL2 = adAtL2
+
+    if not na(lblL1)
+        isDivL = not na(oldAdL1) and not na(oldAdL2) and oldAdL1 > oldAdL2
+        label.set_text(lblL1, "L_b\n" + str.tostring(oldAdL1, "#"))
+        label.set_color(lblL1, isDivL ? color.new(color.teal, 30) : color.new(color.gray, 30))
+
+    if not na(lblL2)
+        label.delete(lblL2)
+
+    lblL2 := lblL1
+    lblL1 := label.new(
+      bar_index - pivotLen, adValL,
+      "L_a\n" + str.tostring(adValL, "#"),
+      style=label.style_label_up,
+      color=color.new(color.teal, 10), textcolor=color.white, size=size.small)
+
+// ══════════════════════════════════════════════════════
+// 우측 상단 테이블
+// ══════════════════════════════════════════════════════
+var table t = table.new(position.top_right, 2, 10, border_width=1)
+
+if barstate.islast
+    table.cell(t, 0, 0, "마켓",               bgcolor=color.new(color.gray, 80))
+    table.cell(t, 1, 0, market)
+
+    table.cell(t, 0, 1, "AD 차이 (오늘)",     bgcolor=color.new(color.gray, 80))
+    table.cell(t, 1, 1, str.tostring(adDiff, "#"))
+
+    table.cell(t, 0, 2, "직전 고점 H_b",      bgcolor=color.new(color.gray, 80))
+    table.cell(t, 1, 2, str.tostring(priceHighPrev, "#.##") + "  (" + str.tostring(barsAgoHighPrev) + "바전)")
+
+    table.cell(t, 0, 3, "H_b일 A/D",          bgcolor=color.new(color.gray, 80))
+    table.cell(t, 1, 3, str.tostring(adAtPrev, "#"))
+
+    table.cell(t, 0, 4, "현재 A/D",           bgcolor=color.new(color.gray, 80))
+    table.cell(t, 1, 4, str.tostring(adLineRaw, "#") + (adLineRaw < adAtPrev ? "  ⚠" : "  ✓"),
+               text_color = adLineRaw < adAtPrev ? color.red : color.teal)
+
+    table.cell(t, 0, 5, "A/D 괴리 %",         bgcolor=color.new(color.gray, 80))
+    table.cell(t, 1, 5, str.tostring(bearDivLivePct, "#.##") + "%",
+               text_color = bearDivLivePct >= dangerPct ? color.red :
+                            bearDivLivePct >= warnPct   ? color.orange : color.gray)
+
+    table.cell(t, 0, 6, "피벗 H_a / H_b",     bgcolor=color.new(color.gray, 80))
+    table.cell(t, 1, 6, not na(priceH1) and not na(priceH2) ?
+               str.tostring(priceH1, "#.##") + " / " + str.tostring(priceH2, "#.##") : "대기중")
+
+    table.cell(t, 0, 7, "A/D @ H_a / H_b",    bgcolor=color.new(color.gray, 80))
+    table.cell(t, 1, 7, not na(adAtH1) and not na(adAtH2) ?
+               str.tostring(adAtH1, "#") + " / " + str.tostring(adAtH2, "#")
+               + (adAtH1 < adAtH2 ? "  ⚠" : "  ✓") : "대기중",
+               text_color = not na(adAtH1) and not na(adAtH2) and adAtH1 < adAtH2 ? color.red : color.teal)
+
+    table.cell(t, 0, 8, "판정",               bgcolor=color.new(color.gray, 80))
+    table.cell(t, 1, 8, status, text_color=statusColor)
+
+    table.cell(t, 0, 9, "설명",               bgcolor=color.new(color.gray, 80))
+    table.cell(t, 1, 9, note, text_color=statusColor)
+
+// ══════════════════════════════════════════════════════
+// 차트 라벨
+// ══════════════════════════════════════════════════════
+var label lbl = na
+
+if barstate.islast
+    if not na(lbl)
+        label.delete(lbl)
+    lbl := label.new(
+      bar_index, adLineRaw,
+      status + "\n" + note,
+      style=label.style_label_left,
+      color=statusColor, textcolor=color.white, size=size.normal)
+
+// ══════════════════════════════════════════════════════
+// 알림
+// ══════════════════════════════════════════════════════
+alertcondition(bearDivLive and bearDivLivePct >= dangerPct,
+  title="부정적 불일치 위험", message="가격 고점 갱신 / A/D선 2% 이상 뒤처짐 — 상승 신뢰도 낮음")
+
+alertcondition(bearDivLive and bearDivLivePct >= warnPct,
+  title="부정적 불일치 주의", message="가격 고점 갱신 / A/D선 뒤처지는 중 — 경계 필요")
+
+alertcondition(bullDivLive and bullDivLivePct >= warnPct,
+  title="긍정적 불일치 (바닥 신호)", message="가격 저점 테스트 / A/D는 개선 — 잠재적 반등 신호")
+
+alertcondition(bearDivPivot,
+  title="피벗 부정적 불일치 확인", message="피벗 고점 기준 A/D 불일치 확정")
+
+alertcondition(bullDivPivot,
+  title="피벗 긍정적 불일치 확인", message="피벗 저점 기준 A/D 불일치 확정")
