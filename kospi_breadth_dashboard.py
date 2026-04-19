@@ -4,15 +4,19 @@ KOSPI / KOSDAQ Breadth Dashboard (Streamlit)
 
 실행:
   pip install -r requirements.txt
-  streamlit run kospi_breadth_dashboard_cloud_safe.py
+  streamlit run kospi_breadth_dashboard.py
 
 환경변수 / Streamlit Secrets:
   KRX_AUTH_KEY=your_key
+
+정책:
+- 공개 데모에서는 서버 시크릿을 자동 사용하지 않음
+- 새 데이터 fetch 시에는 사용자가 직접 KRX AUTH KEY를 입력해야 함
+- 저장된 캐시가 있으면 키 없이도 데모 조회 가능
 """
 from __future__ import annotations
 
 import io
-import os
 import platform
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -27,9 +31,6 @@ import streamlit as st
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-# ──────────────────────────────────────────────────────────────
-# 앱 기본 설정
-# ──────────────────────────────────────────────────────────────
 st.set_page_config(page_title="국장 브레드스 대시보드", page_icon="📊", layout="wide")
 
 API_BASE = "https://data-dbg.krx.co.kr/svc/apis/sto"
@@ -48,9 +49,6 @@ STATUS_MAP = {
 }
 
 
-# ──────────────────────────────────────────────────────────────
-# 유틸
-# ──────────────────────────────────────────────────────────────
 def _setup_korean_font() -> None:
     import matplotlib.font_manager as fm
 
@@ -64,16 +62,6 @@ def _setup_korean_font() -> None:
         if nanum:
             plt.rcParams["font.family"] = nanum[0]
     plt.rcParams["axes.unicode_minus"] = False
-
-
-def get_auth_key() -> str:
-    """Streamlit Secrets → env → 빈 문자열 순서로 반환."""
-    try:
-        if "KRX_AUTH_KEY" in st.secrets:
-            return str(st.secrets["KRX_AUTH_KEY"]).strip()
-    except Exception:
-        pass
-    return os.environ.get("KRX_AUTH_KEY", "").strip()
 
 
 def make_session() -> requests.Session:
@@ -96,9 +84,6 @@ def make_session() -> requests.Session:
 _setup_korean_font()
 
 
-# ──────────────────────────────────────────────────────────────
-# 파일 캐시 유틸
-# ──────────────────────────────────────────────────────────────
 def _cache_path(market: str, start: str, end: str, base: float) -> Path:
     CACHE_DIR.mkdir(exist_ok=True)
     key = f"{market}_{start}_{end}_{int(base)}"
@@ -113,7 +98,8 @@ def load_cache(market: str, start: str, end: str, base: float) -> pd.DataFrame |
 
 
 def save_cache(df: pd.DataFrame, market: str, start: str, end: str, base: float) -> None:
-    _cache_path(market, start, end, base).write_text(df.to_csv(index=False), encoding="utf-8")
+    p = _cache_path(market, start, end, base)
+    df.to_csv(p, index=False)
 
 
 def list_caches() -> list[Path]:
@@ -121,9 +107,17 @@ def list_caches() -> list[Path]:
     return sorted(CACHE_DIR.glob("*.csv"))
 
 
-# ──────────────────────────────────────────────────────────────
-# KRX API
-# ──────────────────────────────────────────────────────────────
+def load_latest_cache() -> pd.DataFrame | None:
+    caches = list_caches()
+    if not caches:
+        return None
+    latest = max(caches, key=lambda p: p.stat().st_mtime)
+    try:
+        return pd.read_csv(latest, dtype={"date": str})
+    except Exception:
+        return None
+
+
 def _krx_post(session: requests.Session, auth_key: str, endpoint: str, payload: dict) -> dict:
     url = API_BASE + endpoint
     headers = {
@@ -171,13 +165,7 @@ def _classify_breadth(df: pd.DataFrame) -> tuple[int, int, int]:
     return int((v > 0).sum()), int((v < 0).sum()), int((v == 0).sum())
 
 
-def build_breadth(
-    auth_key: str,
-    start: str,
-    end: str,
-    market: str,
-    base_value: float = 50000.0,
-) -> pd.DataFrame:
+def build_breadth(auth_key: str, start: str, end: str, market: str, base_value: float = 50000.0) -> pd.DataFrame:
     dates = pd.bdate_range(pd.to_datetime(start), pd.to_datetime(end))
     rows: list[dict] = []
     ad_line = base_value
@@ -231,9 +219,6 @@ def build_breadth(
     return out
 
 
-# ──────────────────────────────────────────────────────────────
-# 지수 OHLC
-# ──────────────────────────────────────────────────────────────
 @st.cache_data(show_spinner=False, ttl=3600)
 def fetch_index_ohlc(market: str, start: str, end: str) -> pd.DataFrame:
     import FinanceDataReader as fdr
@@ -270,20 +255,10 @@ def fetch_index_ohlc(market: str, start: str, end: str) -> pd.DataFrame:
     return out[out["date"] <= end].dropna().reset_index(drop=True)
 
 
-# ──────────────────────────────────────────────────────────────
-# 판정 로직
-# ──────────────────────────────────────────────────────────────
-def classify(
-    price_off_high: float,
-    ad_off_high: float,
-    gap: float,
-    price_off_low: float,
-    ad_off_low: float,
-    price_thr: float = 2.0,
-    ad_thr: float = 3.0,
-    gap_warn: float = 1.5,
-    gap_danger: float = 2.5,
-) -> str:
+def classify(price_off_high: float, ad_off_high: float, gap: float,
+             price_off_low: float, ad_off_low: float,
+             price_thr: float = 2.0, ad_thr: float = 3.0,
+             gap_warn: float = 1.5, gap_danger: float = 2.5) -> str:
     ph = price_off_high >= -price_thr
     ah = ad_off_high >= -ad_thr
     pl = price_off_low <= price_thr
@@ -304,14 +279,8 @@ def classify(
     return "NEUTRAL"
 
 
-def compute_signals(
-    df: pd.DataFrame,
-    lookback: int,
-    price_thr: float,
-    ad_thr: float,
-    gap_warn: float,
-    gap_danger: float,
-) -> dict:
+def compute_signals(df: pd.DataFrame, lookback: int, price_thr: float, ad_thr: float,
+                    gap_warn: float, gap_danger: float) -> dict:
     closes = df["close"].values.astype(float)
     ad_lines = df["ad_line"].values.astype(float)
 
@@ -350,9 +319,6 @@ def compute_signals(
     }
 
 
-# ──────────────────────────────────────────────────────────────
-# 차트 — matplotlib only
-# ──────────────────────────────────────────────────────────────
 def make_chart_img(df: pd.DataFrame, market: str, sig: dict, chart_months: int) -> bytes:
     end_dt = pd.to_datetime(df["date"].astype(str), format="%Y%m%d").max()
     start_dt = end_dt - pd.DateOffset(months=chart_months)
@@ -364,10 +330,7 @@ def make_chart_img(df: pd.DataFrame, market: str, sig: dict, chart_months: int) 
     peak_dt = pd.to_datetime(str(df["date"].iloc[-(days_ago + 1)]), format="%Y%m%d")
 
     fig, (ax1, ax2) = plt.subplots(
-        2,
-        1,
-        figsize=(14, 9),
-        sharex=True,
+        2, 1, figsize=(14, 9), sharex=True,
         gridspec_kw={"height_ratios": [1.4, 1]},
         facecolor="#0e1117",
     )
@@ -380,32 +343,19 @@ def make_chart_img(df: pd.DataFrame, market: str, sig: dict, chart_months: int) 
         ax.yaxis.label.set_color("#aaaaaa")
         ax.grid(True, color="#1e2530", linewidth=0.5)
 
-    # 가벼운 선 차트로 대체
     ax1.plot(pf["dt"], pf["close"].astype(float), color="#26a69a", linewidth=1.8)
     ax1.set_title(f"{market} 지수", color="#e0e0e0", fontsize=13)
     ax1.set_ylabel("지수", color="#aaaaaa")
     ax1.axvline(peak_dt, color="orange", linestyle=":", linewidth=1.2, alpha=0.6)
-    ax1.axhline(
-        y=sig["price_high"],
-        color="orange",
-        linestyle="--",
-        linewidth=1.2,
-        alpha=0.8,
-        label=f"고점 {sig['price_high']:,.2f}",
-    )
+    ax1.axhline(y=sig["price_high"], color="orange", linestyle="--", linewidth=1.2, alpha=0.8,
+                label=f"고점 {sig['price_high']:,.2f}")
     ax1.legend(loc="upper left", fontsize=9, facecolor="#1a1a2e", labelcolor="#e0e0e0", framealpha=0.8)
 
     ax2.plot(pf["dt"], pf["ad_line"].astype(float), color="#1565c0", linewidth=1.8)
     ax2.set_ylabel("A/D Line", color="#aaaaaa")
     ax2.axvline(peak_dt, color="orange", linestyle=":", linewidth=1.2, alpha=0.6)
-    ax2.axhline(
-        y=sig["ad_at_peak"],
-        color="orange",
-        linestyle="--",
-        linewidth=1.2,
-        alpha=0.8,
-        label=f"고점일 A/D {sig['ad_at_peak']:,.0f}",
-    )
+    ax2.axhline(y=sig["ad_at_peak"], color="orange", linestyle="--", linewidth=1.2, alpha=0.8,
+                label=f"고점일 A/D {sig['ad_at_peak']:,.0f}")
     ax2.legend(loc="upper left", fontsize=9, facecolor="#1a1a2e", labelcolor="#e0e0e0", framealpha=0.8)
 
     locator = mdates.AutoDateLocator()
@@ -422,17 +372,9 @@ def make_chart_img(df: pd.DataFrame, market: str, sig: dict, chart_months: int) 
         f"A/D 고점 대비: {sig['ad_off']:.2f}%\n"
         f"괴리: {sig['gap']:.2f}%"
     )
-    ax1.text(
-        0.01,
-        0.97,
-        box_txt,
-        transform=ax1.transAxes,
-        va="top",
-        ha="left",
-        fontsize=10,
-        color="white",
-        bbox=dict(boxstyle="round,pad=0.5", facecolor=sig["color"], alpha=0.9),
-    )
+    ax1.text(0.01, 0.97, box_txt, transform=ax1.transAxes,
+             va="top", ha="left", fontsize=10, color="white",
+             bbox=dict(boxstyle="round,pad=0.5", facecolor=sig["color"], alpha=0.9))
 
     plt.tight_layout(pad=1.5)
     buf = io.BytesIO()
@@ -442,25 +384,28 @@ def make_chart_img(df: pd.DataFrame, market: str, sig: dict, chart_months: int) 
     return buf.read()
 
 
-# ──────────────────────────────────────────────────────────────
-# 메인 앱
-# ──────────────────────────────────────────────────────────────
 def main() -> None:
     st.title("📊 국장 A/D Line 브레드스 대시보드")
     st.caption("KRX 상승·하락 종목 수 기반 / 스탠 와인스태인 브레드스 분석")
 
-    # 초기 부팅 확인
-    auth_key_default = get_auth_key()
+    if "df_merged" not in st.session_state:
+        cached = load_latest_cache()
+        if cached is not None:
+            st.session_state["df_merged"] = cached
+            st.session_state["demo_loaded"] = True
+
     with st.sidebar:
         st.header("⚙️ 설정")
-        auth_key = st.text_input("KRX AUTH_KEY", value=auth_key_default, type="password")
+        st.caption("새 데이터 조회는 각자 본인의 KRX AUTH KEY를 입력해서 사용하세요.")
+        auth_key = st.text_input("KRX AUTH KEY", value="", type="password",
+                                 placeholder="여기에 본인 KRX AUTH KEY 입력")
         market = st.selectbox("마켓", ["KOSPI", "KOSDAQ"])
         c1, c2 = st.columns(2)
         today = datetime.today()
         start_dt = c1.date_input("시작일", value=today - timedelta(days=730))
         end_dt = c2.date_input("종료일", value=today)
 
-        fetch_btn = st.button("🔄 데이터 불러오기", type="primary", use_container_width=True)
+        fetch_btn = st.button("🔄 새 데이터 불러오기", type="primary", use_container_width=True)
 
         st.divider()
         st.subheader("분석 파라미터")
@@ -485,15 +430,10 @@ def main() -> None:
         else:
             st.caption("저장된 캐시 없음")
 
-    if not fetch_btn and "df_merged" not in st.session_state:
-        st.info("👈 사이드바에서 설정 후 **데이터 불러오기** 버튼을 눌러주세요.")
-        st.code("streamlit run kospi_breadth_dashboard_cloud_safe.py", language="bash")
-        return
-
     if fetch_btn:
-        if not auth_key:
-            st.error("KRX AUTH_KEY를 입력해주세요.")
-            return
+        if not auth_key.strip():
+            st.error("새 데이터 조회에는 본인의 KRX AUTH KEY가 필요합니다.")
+            st.stop()
 
         start_str = start_dt.strftime("%Y%m%d")
         end_str = end_dt.strftime("%Y%m%d")
@@ -507,7 +447,7 @@ def main() -> None:
                 with st.spinner("지수 OHLC 수집 중…"):
                     index_df = fetch_index_ohlc(market, start_str, end_str)
                 with st.spinner("브레드스 수집 중…"):
-                    breadth_df = build_breadth(auth_key, start_str, end_str, market, base_value)
+                    breadth_df = build_breadth(auth_key.strip(), start_str, end_str, market, base_value)
 
                 df = (
                     breadth_df.merge(index_df[["date", "open", "high", "low", "close"]], on="date", how="inner")
@@ -518,9 +458,31 @@ def main() -> None:
                 st.success(f"✅ 수집 완료 — {len(df)}일치 데이터 저장됨")
             except Exception as e:
                 st.error(f"데이터 수집 실패: {e}")
-                return
+                st.stop()
 
         st.session_state["df_merged"] = df
+        st.session_state["demo_loaded"] = False
+
+    if "df_merged" not in st.session_state:
+        st.info("👈 사이드바에서 본인 KRX AUTH KEY를 입력해 새 데이터를 불러오거나, 저장된 데모 캐시가 있으면 자동으로 표시됩니다.")
+        st.markdown("""
+**직접 실행**
+```bash
+pip install -r requirements.txt
+export KRX_AUTH_KEY="your_key_here"
+streamlit run kospi_breadth_dashboard.py
+```
+
+**Streamlit Cloud**
+App Settings → Secrets 에 아래처럼 추가:
+```toml
+KRX_AUTH_KEY = "your_key_here"
+```
+        """)
+        return
+
+    if st.session_state.get("demo_loaded", False):
+        st.warning("현재 화면은 저장된 캐시 기반 데모 데이터입니다. 최신 데이터가 필요하면 본인 KRX AUTH KEY로 새로 불러오세요.")
 
     df = st.session_state["df_merged"]
     if len(df) < lookback:
@@ -569,19 +531,8 @@ def main() -> None:
         show["date"] = pd.to_datetime(show["date"].astype(str), format="%Y%m%d").dt.strftime("%Y-%m-%d")
         st.dataframe(
             show[
-                [
-                    "date",
-                    "advances",
-                    "declines",
-                    "unchanged",
-                    "ad_diff",
-                    "ad_line",
-                    "close",
-                    "breadth_thrust_ema10",
-                ]
-            ]
-            .sort_values("date", ascending=False)
-            .reset_index(drop=True),
+                ["date", "advances", "declines", "unchanged", "ad_diff", "ad_line", "close", "breadth_thrust_ema10"]
+            ].sort_values("date", ascending=False).reset_index(drop=True),
             use_container_width=True,
         )
         csv = show.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig")
