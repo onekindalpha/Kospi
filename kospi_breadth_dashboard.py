@@ -5,6 +5,8 @@ KOSPI / KOSDAQ Breadth Dashboard (Streamlit)
   pip install streamlit plotly pandas requests finance-datareader mplfinance matplotlib
   KRX_AUTH_KEY=your_key streamlit run kospi_breadth_dashboard.py
 """
+from __future__ import annotations
+
 # GitHub raw CSV URL (로컬에서 data/ 폴더 push 후 Cloud에서 읽음)
 GITHUB_RAW = "https://raw.githubusercontent.com/onekindalpha/Kospi/main/data"
 GITHUB_BREADTH = {
@@ -15,7 +17,6 @@ GITHUB_INDEX = {
     "KOSPI":  f"{GITHUB_RAW}/kospi_index.csv",
     "KOSDAQ": f"{GITHUB_RAW}/kosdaq_index.csv",
 }
-from __future__ import annotations
 
 import hashlib
 import io
