@@ -32,15 +32,30 @@ import matplotlib.pyplot as plt
 # ── 한글 폰트 설정 ──
 def _setup_korean_font():
     import matplotlib.font_manager as fm
-    sys = platform.system()
-    if sys == "Darwin":
+    import subprocess
+    sys_name = platform.system()
+    if sys_name == "Darwin":
         plt.rcParams["font.family"] = "AppleGothic"
-    elif sys == "Windows":
+    elif sys_name == "Windows":
         plt.rcParams["font.family"] = "Malgun Gothic"
     else:
+        # Linux (Streamlit Cloud): NanumGothic 설치 시도
         nanum = [f.name for f in fm.fontManager.ttflist if "Nanum" in f.name]
         if nanum:
             plt.rcParams["font.family"] = nanum[0]
+        else:
+            try:
+                subprocess.run(
+                    ["apt-get", "install", "-y", "-q", "fonts-nanum"],
+                    check=True, capture_output=True
+                )
+                fm._load_fontmanager(try_read_cache=False)
+                nanum2 = [f.name for f in fm.fontManager.ttflist if "Nanum" in f.name]
+                if nanum2:
+                    plt.rcParams["font.family"] = nanum2[0]
+            except Exception:
+                # 폰트 설치 실패 시 차트 레이블을 영어로 대체 (아래 make_chart_img 참조)
+                pass
     plt.rcParams["axes.unicode_minus"] = False
 
 _setup_korean_font()
@@ -307,28 +322,29 @@ def make_chart_img(df: pd.DataFrame, market: str, sig: dict,
     else:
         ax1.plot(pf["dt"], pf["close"].astype(float), color="#26a69a", linewidth=1.5)
 
-    ax1.set_title(f"{market} 지수 (캔들)", color="#e0e0e0", fontsize=13)
-    ax1.set_ylabel("지수", color="#aaaaaa")
+    ax1.set_title(f"{market} Index", color="#e0e0e0", fontsize=13)
+    ax1.set_ylabel("Index", color="#aaaaaa")
     ax1.grid(True, color="#1e2530", linewidth=0.5)
     # 수직선: 고점 날짜
     ax1.axvline(peak_dn, color="orange", linestyle=":", linewidth=1.2, alpha=0.6)
     # 수평선: 고점 가격 — 캔들과 닿는 수준 확인용
     ax1.axhline(y=sig["price_high"], color="orange", linestyle="--",
                 linewidth=1.2, alpha=0.8,
-                label=f"고점 {sig['price_high']:,.2f}")
+                label=f"Peak {sig['price_high']:,.2f}")
     ax1.legend(loc="upper left", fontsize=9,
                facecolor="#1a1a2e", labelcolor="#e0e0e0", framealpha=0.8)
 
     ax2.plot(pf["dt"], pf["ad_line"].astype(float),
              color="#1565c0", linewidth=1.8)
     ax2.set_ylabel("A/D Line", color="#aaaaaa")
+    ax2.set_title("A/D Line", color="#e0e0e0", fontsize=11)
     ax2.grid(True, color="#1e2530", linewidth=0.5)
     # 수직선: 고점 날짜
     ax2.axvline(peak_dn, color="orange", linestyle=":", linewidth=1.2, alpha=0.6)
     # 수평선: 고점일 당시 A/D 값 — A/D선과 닿는 수준 확인용
     ax2.axhline(y=sig["ad_at_peak"], color="orange", linestyle="--",
                 linewidth=1.2, alpha=0.8,
-                label=f"고점일 A/D {sig['ad_at_peak']:,.0f}")
+                label=f"A/D at Peak {sig['ad_at_peak']:,.0f}")
     ax2.legend(loc="upper left", fontsize=9,
                facecolor="#1a1a2e", labelcolor="#e0e0e0", framealpha=0.8)
 
@@ -339,16 +355,14 @@ def make_chart_img(df: pd.DataFrame, market: str, sig: dict,
     ax2.xaxis.set_major_formatter(formatter)
     fig.autofmt_xdate(rotation=30, ha="right")
 
-    # 판정 박스
-    box_txt = (f"{sig['verdict']}\n{sig['note']}\n"
-               f"─────────────────\n"
-               f"기준고점: {sig['peak_label']}\n"
-               f"가격 고점 대비: {sig['price_off']:.2f}%\n"
-               f"A/D 고점 대비: {sig['ad_off']:.2f}%\n"
-               f"괴리: {sig['gap']:.2f}%")
+    # 판정 박스 — 영어로만 표시 (한글 폰트 없는 환경 대비)
+    box_txt = (f"Peak: {sig['peak_label']}\n"
+               f"Price vs Peak: {sig['price_off']:.2f}%\n"
+               f"A/D vs Peak:   {sig['ad_off']:.2f}%\n"
+               f"Gap:           {sig['gap']:.2f}%")
     ax1.text(0.01, 0.97, box_txt, transform=ax1.transAxes,
              va="top", ha="left", fontsize=10,
-             color="white",
+             color="white", family="monospace",
              bbox=dict(boxstyle="round,pad=0.5", facecolor=sig["color"], alpha=0.9))
 
     plt.tight_layout(pad=1.5)
@@ -390,6 +404,9 @@ def main():
             auth_key = ""
 
         fetch_btn = st.button("🔄 데이터 불러오기", type="primary", use_container_width=True)
+
+        if mode == "🔑 KRX API (직접 수집)":
+            st.caption("💡 새로 불러오고 싶으면 아래 캐시를 지우고 불러오세요.")
 
         st.divider()
         st.subheader("분석 파라미터")
