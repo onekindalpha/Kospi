@@ -1,0 +1,78 @@
+//@version=6
+indicator("고점저점수치", overlay=false)
+
+// 입력값
+showCum = input.bool(false, "누적값 보기")
+maLen   = input.int(10, "MA Length", minval=1)
+
+// 예시 데이터
+// 실제 네 원본 계산식이 따로 있으면 아래 2줄을 그 계산식으로 바꿔야 함
+nhnl    = close - close[1]
+nhnlCum = ta.cum(nhnl)
+nhnlMA  = ta.sma(nhnl, maLen)
+
+// 수익선 / 히스토그램
+barColor = nhnl >= 0 ? color.new(color.teal, 30) : color.new(color.red, 30)
+
+plot(
+    showCum ? nhnlCum : nhnl,
+    title="NH-NL",
+    style=showCum ? plot.style_line : plot.style_histogram,
+    color=showCum ? color.new(color.blue, 0) : barColor,
+    linewidth=showCum ? 2 : 1
+)
+
+// MA 오버레이
+plot(
+    showCum ? na : nhnlMA,
+    title="NH-NL MA",
+    color=color.new(color.orange, 0),
+    linewidth=1
+)
+
+// 배경
+isBull = nhnl > 0 and nhnlMA > 0
+isBear = nhnl < 0 and nhnlMA < 0
+bgcolor(isBull ? color.new(color.teal, 93) : isBear ? color.new(color.red, 93) : na)
+
+// 판정
+string judgement = ""
+color jColor = color.gray
+
+if nhnl > 200 and nhnlMA > 0
+    judgement := "강한 상승 브레드스"
+    jColor := color.teal
+else if nhnl > 0 and nhnlMA > 0
+    judgement := "양호"
+    jColor := color.teal
+else if nhnl < -200 and nhnlMA < 0
+    judgement := "강한 하락 브레드스"
+    jColor := color.red
+else if nhnl < 0 and nhnlMA < 0
+    judgement := "주의"
+    jColor := color.red
+else
+    judgement := "혼조"
+    jColor := color.gray
+
+// 테이블
+var table t = table.new(position.top_right, 2, 6, border_width=1)
+
+if barstate.islast
+    table.cell(t, 0, 0, "지표", text_color=color.white, bgcolor=color.new(color.black, 0))
+    table.cell(t, 1, 0, "값", text_color=color.white, bgcolor=color.new(color.black, 0))
+
+    table.cell(t, 0, 1, "NH-NL", text_color=color.white)
+    table.cell(t, 1, 1, str.tostring(nhnl, format.mintick), text_color=color.white)
+
+    table.cell(t, 0, 2, "NH-NL MA", text_color=color.white)
+    table.cell(t, 1, 2, str.tostring(nhnlMA, format.mintick), text_color=color.white)
+
+    table.cell(t, 0, 3, "MA Length", text_color=color.white)
+    table.cell(t, 1, 3, str.tostring(maLen), text_color=color.white)
+
+    table.cell(t, 0, 4, "Mode", text_color=color.white)
+    table.cell(t, 1, 4, showCum ? "Cumulative" : "Daily", text_color=color.white)
+
+    table.cell(t, 0, 5, "판정", text_color=color.white)
+    table.cell(t, 1, 5, judgement, text_color=jColor)

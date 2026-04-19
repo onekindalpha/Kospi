@@ -1,0 +1,132 @@
+//@version=6
+indicator("P/D 비율", overlay=false)
+
+// =========================
+// 입력값
+// =========================
+market     = input.string("NASDAQ", "Market", options=["NYSE", "NASDAQ"])
+tfBreadth  = input.timeframe("D", "Breadth timeframe")
+maLen      = input.int(10, "MA Length", minval=1)
+overbought = input.float(1.2, "Overbought", step=0.01)
+oversold   = input.float(0.8, "Oversold", step=0.01)
+
+// =========================
+// 심볼 선택
+// =========================
+advSym  = market == "NYSE" ? "USI:ADV"  : "USI:ADVQ"
+declSym = market == "NYSE" ? "USI:DECL" : "USI:DECL.NQ"
+
+// =========================
+// 데이터 불러오기
+// =========================
+adv = request.security(
+    advSym,
+    tfBreadth,
+    close,
+    gaps=barmerge.gaps_off,
+    lookahead=barmerge.lookahead_off,
+    ignore_invalid_symbol=true
+)
+
+decl = request.security(
+    declSym,
+    tfBreadth,
+    close,
+    gaps=barmerge.gaps_off,
+    lookahead=barmerge.lookahead_off,
+    ignore_invalid_symbol=true
+)
+
+// =========================
+// P/D 비율 계산
+// =========================
+pdRatio = not na(adv) and not na(decl) and decl != 0 ? adv / decl : na
+pdMA    = ta.sma(pdRatio, maLen)
+
+// =========================
+// 색상
+// =========================
+pdColor = pdRatio >= overbought ? color.new(color.red, 0) :
+          pdRatio <= oversold   ? color.new(color.teal, 0) :
+          pdRatio >= 1.0        ? color.new(color.green, 20) :
+                                  color.new(color.orange, 20)
+
+// =========================
+// 플롯
+// =========================
+hline(1.0, "기준선 1.0", color=color.new(color.gray, 50))
+hline(overbought, "Overbought", color=color.new(color.red, 60))
+hline(oversold, "Oversold", color=color.new(color.teal, 60))
+
+plot(
+    pdRatio,
+    title="P/D 비율",
+    color=pdColor,
+    linewidth=2
+)
+
+plot(
+    pdMA,
+    title="P/D MA",
+    color=color.new(color.blue, 0),
+    linewidth=1
+)
+
+// =========================
+// 배경
+// =========================
+bgcolor(
+    pdRatio >= overbought ? color.new(color.red, 92) :
+    pdRatio <= oversold   ? color.new(color.teal, 92) :
+    na
+)
+
+// =========================
+// 판정
+// =========================
+string judgement = "데이터 없음"
+color jColor = color.gray
+
+if not na(pdRatio)
+    if pdRatio >= overbought
+        judgement := "과열 - 단기 조정 주의"
+        jColor := color.red
+    else if pdRatio <= oversold
+        judgement := "과매도 - 반등 가능"
+        jColor := color.teal
+    else if pdRatio > 1.5
+        judgement := "강세"
+        jColor := color.green
+    else if pdRatio > 1.0
+        judgement := "양호"
+        jColor := color.green
+    else if pdRatio < 0.7
+        judgement := "약세"
+        jColor := color.orange
+    else
+        judgement := "중립"
+        jColor := color.gray
+
+// =========================
+// 테이블
+// =========================
+var table t = table.new(position.top_right, 2, 6, border_width=1)
+
+if barstate.islast
+    table.cell(t, 0, 0, "항목", text_color=color.white, bgcolor=color.new(color.black, 0))
+    table.cell(t, 1, 0, "값", text_color=color.white, bgcolor=color.new(color.black, 0))
+
+    table.cell(t, 0, 1, "ADV", text_color=color.white)
+    table.cell(t, 1, 1, na(adv) ? "na" : str.tostring(adv, format.mintick), text_color=color.white)
+
+    table.cell(t, 0, 2, "DECL", text_color=color.white)
+    table.cell(t, 1, 2, na(decl) ? "na" : str.tostring(decl, format.mintick), text_color=color.white)
+
+    table.cell(t, 0, 3, "P/D 비율", text_color=color.white)
+    table.cell(t, 1, 3, na(pdRatio) ? "na" : str.tostring(pdRatio, format.mintick), text_color=color.white)
+
+    table.cell(t, 0, 4, "P/D MA", text_color=color.white)
+    table.cell(t, 1, 4, na(pdMA) ? "na" : str.tostring(pdMA, format.mintick), text_color=color.white)
+
+    table.cell(t, 0, 5, "판정", text_color=color.white)
+    table.cell(t, 1, 5, judgement, text_color=jColor)

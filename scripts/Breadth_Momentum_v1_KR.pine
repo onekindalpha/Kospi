@@ -1,0 +1,80 @@
+//@version=6
+indicator("브레드스 모멘텀 v1 KR", overlay=false)
+
+// =========================
+// 입력값
+// =========================
+market    = input.string("NYSE", "Market", options=["NYSE", "NASDAQ"])
+tfBreadth = input.timeframe("D", "Breadth timeframe", tooltip="일봉 차트 = D / 주봉 차트 = W")
+maFast    = input.int(10, "단기 MA", minval=2, maxval=50)
+maSlow    = input.int(30, "장기 MA", minval=5, maxval=200)
+maSignal  = input.int(10, "시그널 MA", minval=2, maxval=30)
+
+// =========================
+// 심볼 선택
+// =========================
+advSym  = market == "NYSE" ? "USI:ADV"     : "USI:ADVQ"
+declSym = market == "NYSE" ? "USI:DECL"    : "USI:DECL.NQ"
+
+// =========================
+// 데이터 불러오기
+// =========================
+adv = request.security(
+     advSym,
+     tfBreadth,
+     close,
+     gaps=barmerge.gaps_off,
+     lookahead=barmerge.lookahead_off,
+     ignore_invalid_symbol=true
+)
+
+decl = request.security(
+     declSym,
+     tfBreadth,
+     close,
+     gaps=barmerge.gaps_off,
+     lookahead=barmerge.lookahead_off,
+     ignore_invalid_symbol=true
+)
+
+// =========================
+// 브레드스 모멘텀 계산
+// =========================
+adDiff   = nz(adv, 0) - nz(decl, 0)
+maF      = ta.sma(adDiff, maFast)
+maS      = ta.sma(adDiff, maSlow)
+momentum = maF - maS
+signal   = ta.sma(momentum, maSignal)
+
+// =========================
+// 상태 판정
+// =========================
+isBull = momentum > 0 and momentum > signal
+isBear = momentum < 0 and momentum < signal
+isWarn = not isBull and not isBear
+
+histColor = isBull ? color.lime : isBear ? color.red : color.gray
+
+// =========================
+// 플롯
+// =========================
+hline(0, "Zero Line", color=color.new(color.gray, 40))
+plot(momentum, "Momentum", color=color.white, linewidth=2)
+plot(signal, "Signal", color=color.orange, linewidth=2)
+plot(momentum - signal, "Histogram", style=plot.style_columns, color=histColor)
+
+// =========================
+// 시그널
+// =========================
+bullCross = ta.crossover(momentum, signal)
+bearCross = ta.crossunder(momentum, signal)
+zeroUp    = ta.crossover(momentum, 0)
+zeroDown  = ta.crossunder(momentum, 0)
+
+plotshape(bullCross, title="상승 시그널", location=location.bottom, style=shape.triangleup, color=color.lime, size=size.tiny, text="Bull")
+plotshape(bearCross, title="하락 시그널", location=location.top, style=shape.triangledown, color=color.red, size=size.tiny, text="Bear")
+
+alertcondition(bullCross, title="브레드스 상승 시그널", message="Breadth Momentum bullish crossover")
+alertcondition(bearCross, title="브레드스 하락 시그널", message="Breadth Momentum bearish crossover")
+alertcondition(zeroUp, title="0선 상향 돌파", message="Breadth Momentum crossed above zero")
+alertcondition(zeroDown, title="0선 하향 이탈", message="Breadth Momentum crossed below zero")
