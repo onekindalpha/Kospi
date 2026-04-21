@@ -95,6 +95,89 @@ STATUS_MAP = {
 }
 
 # ──────────────────────────────────────────────────────────────
+# NH-NL 캐시 경로
+# ──────────────────────────────────────────────────────────────
+NHNL_CACHE_DIR = Path("./nhnl_cache")
+
+def _nhnl_cache_path(market: str, date_str: str) -> Path:
+    NHNL_CACHE_DIR.mkdir(exist_ok=True)
+    return NHNL_CACHE_DIR / f"{market}_{date_str}.csv"
+
+def load_nhnl_cache(market: str, date_str: str) -> pd.DataFrame | None:
+    p = _nhnl_cache_path(market, date_str)
+    if p.exists():
+        return pd.read_csv(p, dtype={"date": str})
+    return None
+
+def save_nhnl_cache(df: pd.DataFrame, market: str, date_str: str):
+    p = _nhnl_cache_path(market, date_str)
+    df.to_csv(p, index=False)
+
+def compute_nhnl_fdr(market: str, end_date: str, prog=None) -> pd.DataFrame:
+    """
+    FDR로 KOSPI/KOSDAQ 전체 종목 1년치 종가 수집 →
+    매 거래일 기준 52주(260거래일) 신고가/신저가 종목 수 계산 →
+    주봉(금요일) 집계 반환.
+    """
+    sym = {"KOSPI": "KOSPI", "KOSDAQ": "KOSDAQ"}.get(market, "KOSPI")
+    end_dt    = pd.to_datetime(end_date, format="%Y%m%d")
+    start_dt  = end_dt - timedelta(days=400)  # 52주+여유
+
+    # 전체 종목 리스트
+    listing = fdr.StockListing(sym)
+    codes = listing["Code"].tolist() if "Code" in listing.columns else listing.iloc[:, 0].tolist()
+
+    all_closes = {}
+    total = len(codes)
+    for i, code in enumerate(codes):
+        try:
+            raw = fdr.DataReader(code,
+                                  start_dt.strftime("%Y-%m-%d"),
+                                  end_dt.strftime("%Y-%m-%d"))
+            if raw.empty:
+                continue
+            raw.index = pd.to_datetime(raw.index)
+            close_col = next((c for c in raw.columns if str(c).lower() in ("close", "adj close")), None)
+            if close_col is None:
+                continue
+            all_closes[code] = raw[close_col].rename(code)
+        except Exception:
+            continue
+        if prog and i % 50 == 0:
+            prog.progress(i / total, text=f"종목 수집 중… {i}/{total}")
+
+    if not all_closes:
+        return pd.DataFrame()
+
+    price_df = pd.concat(all_closes.values(), axis=1).sort_index()
+
+    # 매 거래일: 52주(260거래일) 신고가/신저가 종목 수
+    records = []
+    dates = price_df.index
+    for idx, dt in enumerate(dates):
+        if idx < 260:
+            continue
+        window = price_df.iloc[idx - 260: idx]
+        today  = price_df.iloc[idx]
+        w_high = window.max()
+        w_low  = window.min()
+        nh = int((today >= w_high).sum())
+        nl = int((today <= w_low).sum())
+        records.append({"date": dt.strftime("%Y%m%d"), "new_highs": nh, "new_lows": nl, "nhnl": nh - nl})
+
+    daily = pd.DataFrame(records)
+    if daily.empty:
+        return daily
+
+    # 주봉(금요일) 집계 — 주간 NH/NL 합산
+    daily["dt"] = pd.to_datetime(daily["date"], format="%Y%m%d")
+    daily = daily.set_index("dt")
+    weekly = daily[["new_highs", "new_lows", "nhnl"]].resample("W-FRI").sum()
+    weekly = weekly[weekly["new_highs"] > 0].reset_index()
+    weekly["date"] = weekly["dt"].dt.strftime("%Y%m%d")
+    return weekly
+
+# ──────────────────────────────────────────────────────────────
 # 파일 캐시 유틸
 # ──────────────────────────────────────────────────────────────
 def _cache_path(market: str, start: str, end: str, base: float) -> Path:
@@ -617,70 +700,81 @@ def main():
     with tab3:
         st.subheader("🏔 고점-저점 수치 (신고가 - 신저가 종목 수)")
         st.caption(
-            "스탠 와인스태인 책 정의: 그 주 신고가 기록 종목 수 - 신저가 기록 종목 수 (주봉 집계). "
-            "KRX 개별종목 일별 데이터 기반으로 52주 신고가/신저가 판별."
+            "스탠 와인스태인 책 정의: 매주 신고가 기록 종목 수 - 신저가 기록 종목 수. "
+            "FDR로 전체 종목 1년치 종가 수집 → 52주 신고가/신저가 판별 → 주봉 집계."
         )
 
-        # KRX breadth 캐시에 개별종목 고가/저가 데이터가 있으면 계산
-        # build_breadth()가 수집한 일별 advances/declines만 있고 종목별 가격은 없음
-        # → GitHub CSV에 nh/nl 컬럼이 있으면 사용, 없으면 KRX API 재수집 안내
-
-        if "new_highs" in df.columns and "new_lows" in df.columns:
-            nhnl_s  = pd.Series((df["new_highs"] - df["new_lows"]).values.astype(float))
-            nhnl_source = "KRX 데이터"
+        if not FDR_OK:
+            st.error("finance-datareader 미설치: pip install finance-datareader")
         else:
-            # 대용: advances/(advances+declines) 비율 기반 weekly 집계
-            # 주봉으로 리샘플: 주간 advances 합 - declines 합
-            df_dt = df.copy()
-            df_dt["dt"] = pd.to_datetime(df_dt["date"].astype(str), format="%Y%m%d")
-            df_dt = df_dt.set_index("dt")
-            weekly_adv  = df_dt["advances"].resample("W-FRI").sum()
-            weekly_decl = df_dt["declines"].resample("W-FRI").sum()
-            nhnl_weekly = (weekly_adv - weekly_decl).reset_index()
-            nhnl_weekly.columns = ["dt", "nhnl"]
-            nhnl_weekly = nhnl_weekly[nhnl_weekly["nhnl"].notna()]
-            nhnl_source = "주봉 등락종목수 차이 (신고가/신저가 대용)"
+            end_date_str = df["date"].iloc[-1]
+            cached_nhnl  = load_nhnl_cache(market, end_date_str)
 
-            end_dt3   = nhnl_weekly["dt"].max()
-            start_dt3 = end_dt3 - pd.DateOffset(months=chart_months)
-            pf3       = nhnl_weekly[nhnl_weekly["dt"] >= start_dt3].copy().reset_index(drop=True)
-            nhnl_plot = pf3["nhnl"]
-            nhnl_ma   = nhnl_plot.rolling(4).mean()
+            if cached_nhnl is not None and not cached_nhnl.empty:
+                nhnl_df = cached_nhnl
+                st.success(f"✅ NH-NL 캐시 로드 — {len(nhnl_df)}주치")
+            else:
+                if st.button("📥 NH-NL 계산 (전종목 수집, 수분 소요)", key="nhnl_btn"):
+                    prog3 = st.progress(0, text="전체 종목 수집 중…")
+                    try:
+                        nhnl_df = compute_nhnl_fdr(market, end_date_str, prog=prog3)
+                        prog3.empty()
+                        if nhnl_df.empty:
+                            st.error("NH-NL 데이터 수집 실패")
+                            nhnl_df = None
+                        else:
+                            save_nhnl_cache(nhnl_df, market, end_date_str)
+                            st.session_state[f"nhnl_{market}"] = nhnl_df
+                            st.success(f"✅ NH-NL 계산 완료 — {len(nhnl_df)}주치")
+                    except Exception as e:
+                        prog3.empty()
+                        st.error(f"NH-NL 수집 오류: {e}")
+                        nhnl_df = None
+                else:
+                    nhnl_df = st.session_state.get(f"nhnl_{market}")
+                    if nhnl_df is None:
+                        st.info("👆 버튼을 눌러 전종목 데이터를 수집하세요. (첫 실행만 수분 소요, 이후 캐시 사용)")
 
-            last_nhnl = nhnl_weekly["nhnl"].iloc[-1]
-            nhnl_verdict = ("🟢 강세" if last_nhnl > 200 else
-                            "🟢 약한 강세" if last_nhnl > 0 else
-                            "🔴 약세" if last_nhnl < -200 else "🟠 약한 약세")
+            if nhnl_df is not None and not nhnl_df.empty:
+                nhnl_df["dt"] = pd.to_datetime(nhnl_df["date"].astype(str), format="%Y%m%d")
+                end_dt3   = nhnl_df["dt"].max()
+                start_dt3 = end_dt3 - pd.DateOffset(months=chart_months)
+                pf3       = nhnl_df[nhnl_df["dt"] >= start_dt3].copy().reset_index(drop=True)
 
-            st.info(
-                f"💡 현재 데이터: **{nhnl_source}**\n\n"
-                "KRX 개별종목 52주 신고가/신저가 데이터는 "
-                "GitHub CSV에 `new_highs`, `new_lows` 컬럼을 추가하면 정확하게 표시됩니다."
-            )
+                nhnl_plot = pf3["nhnl"]
+                nhnl_ma   = nhnl_plot.rolling(4).mean()
+                last_nhnl = int(nhnl_df["nhnl"].iloc[-1])
+                last_nh   = int(nhnl_df["new_highs"].iloc[-1])
+                last_nl   = int(nhnl_df["new_lows"].iloc[-1])
 
-            h1, h2, h3 = st.columns(3)
-            h1.metric("주간 NH-NL", f"{int(last_nhnl):+,}")
-            h2.metric("판정", nhnl_verdict)
-            h3.metric("기준", nhnl_source)
+                nhnl_verdict = ("🟢 강세"     if last_nhnl > 100 else
+                                "🟢 약한 강세" if last_nhnl > 0   else
+                                "🔴 약세"     if last_nhnl < -100 else "🟠 약한 약세")
 
-            fig_hl = go.Figure()
-            fig_hl.add_trace(go.Bar(
-                x=pf3["dt"], y=nhnl_plot,
-                marker_color=[("#26a69a" if v >= 0 else "#ef5350") for v in nhnl_plot],
-                name="주봉 NH-NL", opacity=0.8
-            ))
-            fig_hl.add_trace(go.Scatter(
-                x=pf3["dt"], y=nhnl_ma,
-                line=dict(color="orange", width=1.5),
-                name="4주 MA"
-            ))
-            fig_hl.add_hline(y=0, line_color="gray", line_dash="dot")
-            fig_hl.update_layout(
-                title=f"{market} 고점-저점 수치 (주봉 등락종목수 차이)",
-                template="plotly_dark", height=420,
-                yaxis_title="NH-NL"
-            )
-            st.plotly_chart(fig_hl, use_container_width=True)
+                h1, h2, h3, h4 = st.columns(4)
+                h1.metric("신고가 종목 수", f"{last_nh:,}")
+                h2.metric("신저가 종목 수", f"{last_nl:,}")
+                h3.metric("NH-NL",          f"{last_nhnl:+,}")
+                h4.metric("판정",            nhnl_verdict)
+
+                fig_hl = go.Figure()
+                fig_hl.add_trace(go.Bar(
+                    x=pf3["dt"], y=nhnl_plot,
+                    marker_color=[("#26a69a" if v >= 0 else "#ef5350") for v in nhnl_plot],
+                    name="주봉 NH-NL", opacity=0.85
+                ))
+                fig_hl.add_trace(go.Scatter(
+                    x=pf3["dt"], y=nhnl_ma,
+                    line=dict(color="orange", width=1.5),
+                    name="4주 MA"
+                ))
+                fig_hl.add_hline(y=0, line_color="gray", line_dash="dot")
+                fig_hl.update_layout(
+                    title=f"{market} 고점-저점 수치 — 52주 신고가/신저가 종목 수 (주봉)",
+                    template="plotly_dark", height=420,
+                    yaxis_title="NH-NL 종목 수"
+                )
+                st.plotly_chart(fig_hl, use_container_width=True)
 
     # ══════════════════════════════════════════════
     # TAB 4: P/D 비율 (스탠 와인스태인 책 정의)
