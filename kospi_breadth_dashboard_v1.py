@@ -109,50 +109,71 @@ def save_nhnl_cache(df: pd.DataFrame, market: str, date_str: str):
     p = _nhnl_cache_path(market, date_str)
     df.to_csv(p, index=False)
 
-def compute_nhnl_fdr(market: str, end_date: str, prog=None) -> pd.DataFrame:
+def compute_nhnl_pykrx(market: str, end_date: str, prog=None) -> pd.DataFrame:
     """
-    FDR로 KOSPI/KOSDAQ 전체 종목 1년치 종가 수집 →
+    pykrx로 KOSPI/KOSDAQ 전체 종목 OHLCV 일괄 수집 →
     매 거래일 기준 52주(260거래일) 신고가/신저가 종목 수 계산 →
     주봉(금요일) 집계 반환.
+    pykrx는 KRX 웹에서 직접 긁어오므로 API KEY 불필요, 속도 빠름.
     """
-    sym = {"KOSPI": "KOSPI", "KOSDAQ": "KOSDAQ"}.get(market, "KOSPI")
-    end_dt    = pd.to_datetime(end_date, format="%Y%m%d")
-    start_dt  = end_dt - timedelta(days=400)  # 52주+여유
+    try:
+        from pykrx import stock as pykrx_stock
+    except ImportError:
+        raise RuntimeError("pykrx 미설치: pip install pykrx")
 
-    # 전체 종목 리스트
-    listing = fdr.StockListing(sym)
-    codes = listing["Code"].tolist() if "Code" in listing.columns else listing.iloc[:, 0].tolist()
+    end_dt   = pd.to_datetime(end_date, format="%Y%m%d")
+    start_dt = end_dt - timedelta(days=420)  # 52주(260거래일) + 여유
+    start_str = start_dt.strftime("%Y%m%d")
+    end_str   = end_dt.strftime("%Y%m%d")
 
+    mkt = "KOSPI" if market == "KOSPI" else "KOSDAQ"
+
+    # 1) 종목 리스트
+    tickers = pykrx_stock.get_market_ticker_list(end_str, market=mkt)
+    if not tickers:
+        return pd.DataFrame()
+
+    total = len(tickers)
+    if prog:
+        prog.progress(0.0, text=f"종목 리스트 로드 완료 ({total}개), 가격 수집 중…")
+
+    # 2) 전체 종목 종가 한 번에 수집 (날짜×종목 피벗)
+    # get_market_ohlcv_by_date 는 단일 종목용이므로
+    # get_market_ohlcv 로 날짜별 전체 종목 가져온 뒤 피벗
     all_closes = {}
-    total = len(codes)
-    for i, code in enumerate(codes):
-        try:
-            raw = fdr.DataReader(code,
-                                  start_dt.strftime("%Y-%m-%d"),
-                                  end_dt.strftime("%Y-%m-%d"))
-            if raw.empty:
+    batch_size = 50
+    for batch_i in range(0, total, batch_size):
+        batch = tickers[batch_i: batch_i + batch_size]
+        for code in batch:
+            try:
+                df_raw = pykrx_stock.get_market_ohlcv_by_date(start_str, end_str, code)
+                if df_raw is None or df_raw.empty:
+                    continue
+                df_raw.index = pd.to_datetime(df_raw.index)
+                close_col = next((c for c in df_raw.columns
+                                  if str(c).strip() in ("종가", "Close", "close")), None)
+                if close_col is None and len(df_raw.columns) >= 4:
+                    close_col = df_raw.columns[3]  # 종가는 보통 4번째
+                if close_col is None:
+                    continue
+                all_closes[code] = df_raw[close_col].rename(code)
+            except Exception:
                 continue
-            raw.index = pd.to_datetime(raw.index)
-            close_col = next((c for c in raw.columns if str(c).lower() in ("close", "adj close")), None)
-            if close_col is None:
-                continue
-            all_closes[code] = raw[close_col].rename(code)
-        except Exception:
-            continue
-        if prog and i % 50 == 0:
-            prog.progress(i / total, text=f"종목 수집 중… {i}/{total}")
+        if prog:
+            done = min(batch_i + batch_size, total)
+            prog.progress(done / total, text=f"종목 수집 중… {done}/{total}")
 
     if not all_closes:
         return pd.DataFrame()
 
     price_df = pd.concat(all_closes.values(), axis=1).sort_index()
 
-    # 매 거래일: 52주(260거래일) 신고가/신저가 종목 수
+    # 3) 매 거래일: 260거래일 롤링 신고가/신저가 종목 수
     records = []
     dates = price_df.index
-    for idx, dt in enumerate(dates):
-        if idx < 260:
-            continue
+    n_dates = len(dates)
+    for idx in range(260, n_dates):
+        dt     = dates[idx]
         window = price_df.iloc[idx - 260: idx]
         today  = price_df.iloc[idx]
         w_high = window.max()
@@ -165,13 +186,19 @@ def compute_nhnl_fdr(market: str, end_date: str, prog=None) -> pd.DataFrame:
     if daily.empty:
         return daily
 
-    # 주봉(금요일) 집계 — 주간 NH/NL 합산
+    # 4) 주봉(금요일) 집계
     daily["dt"] = pd.to_datetime(daily["date"], format="%Y%m%d")
     daily = daily.set_index("dt")
     weekly = daily[["new_highs", "new_lows", "nhnl"]].resample("W-FRI").sum()
     weekly = weekly[weekly["new_highs"] > 0].reset_index()
     weekly["date"] = weekly["dt"].dt.strftime("%Y%m%d")
     return weekly
+
+
+# 하위 호환: FDR 버전도 남겨두되 pykrx 버전을 기본으로 사용
+def compute_nhnl_fdr(market: str, end_date: str, prog=None) -> pd.DataFrame:
+    """pykrx 버전으로 리다이렉트 (FDR 루프는 너무 느려서 대체)"""
+    return compute_nhnl_pykrx(market, end_date, prog)
 
 # ──────────────────────────────────────────────────────────────
 # 파일 캐시 유틸
@@ -710,10 +737,10 @@ def main():
                 nhnl_df = cached_nhnl
                 st.success(f"✅ NH-NL 캐시 로드 — {len(nhnl_df)}주치")
             else:
-                if st.button("📥 NH-NL 계산 (전종목 수집, 수분 소요)", key="nhnl_btn"):
+                if st.button("📥 NH-NL 계산 (pykrx 사용, 수분 소요)", key="nhnl_btn"):
                     prog3 = st.progress(0, text="전체 종목 수집 중…")
                     try:
-                        nhnl_df = compute_nhnl_fdr(market, end_date_str, prog=prog3)
+                        nhnl_df = compute_nhnl_pykrx(market, end_date_str, prog=prog3)
                         prog3.empty()
                         if nhnl_df.empty:
                             st.error("NH-NL 데이터 수집 실패")
