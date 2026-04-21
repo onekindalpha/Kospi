@@ -22,12 +22,6 @@ except ImportError:
     MPL_OK = False
 
 try:
-    import pandas_datareader.data as web
-    PDR_OK = True
-except ImportError:
-    PDR_OK = False
-
-try:
     import yfinance as yf
     YF_OK = True
 except ImportError:
@@ -72,30 +66,43 @@ STATUS_MAP = {
 # 데이터 수집 헬퍼
 # ──────────────────────────────────────────────────────────────
 def _stooq(sym: str, start: str, end: str) -> pd.Series:
-    """pandas_datareader Stooq로 종가 Series 반환. start/end: YYYYMMDD"""
-    if not PDR_OK:
-        raise RuntimeError("pandas-datareader 미설치")
-    s = pd.to_datetime(start, format="%Y%m%d")
-    e = pd.to_datetime(end,   format="%Y%m%d")
-    df = web.DataReader(sym, "stooq", s, e)
-    if df is None or df.empty:
+    """requests로 Stooq CSV 직접 호출. start/end: YYYYMMDD"""
+    import requests as _req
+    s = pd.to_datetime(start, format="%Y%m%d").strftime("%Y%m%d")
+    e = pd.to_datetime(end,   format="%Y%m%d").strftime("%Y%m%d")
+    url = f"https://stooq.com/q/d/l/?s={sym.lower()}&d1={s}&d2={e}&i=d"
+    r = _req.get(url, timeout=20, headers={"User-Agent": "Mozilla/5.0"})
+    if r.status_code != 200:
+        raise RuntimeError(f"Stooq {sym} HTTP {r.status_code}")
+    lines = [l for l in r.text.strip().splitlines() if l and not l.startswith("<")]
+    if len(lines) < 2:
         raise RuntimeError(f"Stooq {sym} 데이터 없음")
-    df = df.sort_index()
-    col = "Close" if "Close" in df.columns else df.columns[0]
+    from io import StringIO
+    df = pd.read_csv(StringIO("\n".join(lines)))
+    df.columns = [c.strip().lower() for c in df.columns]
+    if "date" not in df.columns:
+        raise RuntimeError(f"Stooq {sym} date 컬럼 없음: {list(df.columns)}")
+    df["date"] = pd.to_datetime(df["date"])
+    df = df.set_index("date").sort_index()
+    col = next((c for c in df.columns if "close" in c), df.columns[-1])
     return pd.to_numeric(df[col], errors="coerce").dropna()
 
 def _stooq_ohlc(sym: str, start: str, end: str) -> pd.DataFrame:
-    """pandas_datareader Stooq로 OHLC DataFrame 반환"""
-    if not PDR_OK:
-        raise RuntimeError("pandas-datareader 미설치")
-    s = pd.to_datetime(start, format="%Y%m%d")
-    e = pd.to_datetime(end,   format="%Y%m%d")
-    df = web.DataReader(sym, "stooq", s, e)
-    if df is None or df.empty:
+    """requests로 Stooq OHLC 직접 호출"""
+    import requests as _req
+    s = pd.to_datetime(start, format="%Y%m%d").strftime("%Y%m%d")
+    e = pd.to_datetime(end,   format="%Y%m%d").strftime("%Y%m%d")
+    url = f"https://stooq.com/q/d/l/?s={sym.lower()}&d1={s}&d2={e}&i=d"
+    r = _req.get(url, timeout=20, headers={"User-Agent": "Mozilla/5.0"})
+    if r.status_code != 200:
+        raise RuntimeError(f"Stooq {sym} HTTP {r.status_code}")
+    lines = [l for l in r.text.strip().splitlines() if l and not l.startswith("<")]
+    if len(lines) < 2:
         raise RuntimeError(f"Stooq {sym} 데이터 없음")
-    df = df.sort_index()
-    df.columns = [c.lower() for c in df.columns]
-    df["date"] = df.index.strftime("%Y%m%d")
+    from io import StringIO
+    df = pd.read_csv(StringIO("\n".join(lines)))
+    df.columns = [c.strip().lower() for c in df.columns]
+    df["date"] = pd.to_datetime(df["date"]).dt.strftime("%Y%m%d")
     for c in ["open","high","low","close"]:
         if c in df.columns:
             df[c] = pd.to_numeric(df[c], errors="coerce")
@@ -302,9 +309,6 @@ def main():
         return
 
     if fetch_btn:
-        if not PDR_OK:
-            st.error("pandas-datareader 미설치: pip install pandas-datareader")
-            return
         start_str = start_dt.strftime("%Y%m%d")
         end_str   = end_dt.strftime("%Y%m%d")
         try:
