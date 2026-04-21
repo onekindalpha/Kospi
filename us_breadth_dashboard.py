@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 # US Market Breadth Dashboard — 스탠 와인스태인 방식
-# 데이터: yfinance (ADV/DECL/NH/NL 전용 심볼 + 지수 + 배당)
+# AD Line/NH-NL: Stooq ($nyad.i 등) | 지수OHLC+배당: yfinance
 
 import io
+import requests as _requests
 from datetime import datetime, timedelta
 
 import matplotlib
@@ -34,24 +35,20 @@ except ImportError:
 # ──────────────────────────────────────────────────────────────
 MARKET_CFG = {
     "NYSE": {
-        # ^ADD = NYSE daily net advances (advances minus declines, raw daily value)
-        # ^NYAD = cumulative AD line (use diff() to get daily net)
-        # We prefer ^ADD as it's the actual daily diff, not cumulative
-        "adv_sym":  "^ADD",    # NYSE Net Advances (daily AD difference)
-        "adv_alt":  "^NYAD",   # fallback: cumulative AD line
-        "idx_sym":  "^DJI",
-        "nhi_sym":  "^NYHGH",  # NYSE New Highs
-        "nlo_sym":  "^NYLOW",  # NYSE New Lows
+        # Stooq 심볼: $NYAD = NYSE Advance-Decline Line (누적)
+        "stooq_ad":  "$nyad.i",   # Stooq NYSE AD Line
+        "stooq_nhi": "$nyhgh.i",  # NYSE New Highs
+        "stooq_nlo": "$nylow.i",  # NYSE New Lows
+        "idx_sym":   "^DJI",      # yfinance 지수
         "div_fallback": 0.020,
         "label": "NYSE / 다우존스",
         "yf_pd_sym": "^DJI",
     },
     "NASDAQ": {
-        "adv_sym":  "^ADN",    # NASDAQ Net Advances (daily AD difference)
-        "adv_alt":  "^NAAD",   # fallback: cumulative AD line
-        "idx_sym":  "^IXIC",
-        "nhi_sym":  "^NAHGH",  # NASDAQ New Highs
-        "nlo_sym":  "^NALO",   # NASDAQ New Lows
+        "stooq_ad":  "$naad.i",   # Stooq NASDAQ AD Line
+        "stooq_nhi": "$nahgh.i",  # NASDAQ New Highs
+        "stooq_nlo": "$nalo.i",   # NASDAQ New Lows
+        "idx_sym":   "^IXIC",
         "div_fallback": 0.007,
         "label": "NASDAQ",
         "yf_pd_sym": "^IXIC",
@@ -71,9 +68,51 @@ STATUS_MAP = {
 # ──────────────────────────────────────────────────────────────
 # 데이터 수집
 # ──────────────────────────────────────────────────────────────
+def _stooq_fetch(sym: str, start: str, end: str) -> pd.Series:
+    """
+    Stooq CSV API로 종가 Series 반환. start/end YYYYMMDD.
+    Stooq URL 예: https://stooq.com/q/d/l/?s=$nyad.i&d1=20220101&d2=20260421&i=d
+    """
+    url = (f"https://stooq.com/q/d/l/?s={sym}"
+           f"&d1={start}&d2={end}&i=d")
+    try:
+        resp = _requests.get(url, timeout=20,
+                             headers={"User-Agent": "Mozilla/5.0"})
+        resp.raise_for_status()
+    except Exception as ex:
+        raise RuntimeError(f"Stooq 요청 실패 ({sym}): {ex}")
+
+    text = resp.text.strip()
+    # Stooq가 데이터 없을 때 HTML 또는 짧은 에러 반환
+    if not text or "<html" in text.lower() or len(text) < 30:
+        raise RuntimeError(f"Stooq {sym}: 데이터 없음 또는 에러 응답")
+
+    try:
+        from io import StringIO
+        df = pd.read_csv(StringIO(text))
+    except Exception as ex:
+        raise RuntimeError(f"Stooq {sym} CSV 파싱 실패: {ex}")
+
+    # 컬럼 정규화
+    df.columns = [c.strip().lower() for c in df.columns]
+    if "date" not in df.columns:
+        raise RuntimeError(f"Stooq {sym}: date 컬럼 없음, 컬럼={list(df.columns)}")
+    df["date"] = pd.to_datetime(df["date"], errors="coerce")
+    df = df.dropna(subset=["date"]).set_index("date").sort_index()
+
+    close_col = next((c for c in df.columns if c in ("close", "zamkniecie", "закрытие")), None)
+    if close_col is None and len(df.columns) >= 1:
+        close_col = df.columns[-1]  # 마지막 컬럼이 보통 종가
+    if close_col is None:
+        raise RuntimeError(f"Stooq {sym}: close 컬럼 없음")
+
+    s_out = pd.to_numeric(df[close_col], errors="coerce").dropna()
+    if s_out.empty:
+        raise RuntimeError(f"Stooq {sym}: 유효한 데이터 없음")
+    return s_out
+
 def _yf_history(sym: str, start: str, end: str) -> pd.Series:
-    """yfinance Ticker.history()로 종가 Series. start/end YYYYMMDD.
-    ^ADD, ^ADN 같은 breadth 심볼도 안정적으로 처리."""
+    """yfinance Ticker.history()로 종가 Series. start/end YYYYMMDD."""
     s = pd.to_datetime(start, format="%Y%m%d").strftime("%Y-%m-%d")
     e = (pd.to_datetime(end, format="%Y%m%d") + timedelta(days=1)).strftime("%Y-%m-%d")
     ticker = yf.Ticker(sym)
@@ -82,58 +121,31 @@ def _yf_history(sym: str, start: str, end: str) -> pd.Series:
     except Exception as ex:
         raise RuntimeError(f"yfinance {sym} 조회 오류: {ex}")
     if raw is None or raw.empty:
-        raise RuntimeError(f"yfinance {sym} 데이터 없음 (empty)")
-    # timezone 제거
+        raise RuntimeError(f"yfinance {sym} 데이터 없음")
     if hasattr(raw.index, 'tz') and raw.index.tz is not None:
         raw.index = raw.index.tz_localize(None)
     else:
         raw.index = pd.to_datetime(raw.index)
-    # Close 컬럼 추출 — MultiIndex 방어
     if isinstance(raw.columns, pd.MultiIndex):
         raw.columns = raw.columns.get_level_values(0)
     if "Close" not in raw.columns:
-        raise RuntimeError(f"yfinance {sym}: Close 컬럼 없음. 컬럼={list(raw.columns)}")
+        raise RuntimeError(f"yfinance {sym}: Close 컬럼 없음")
     s_out = pd.to_numeric(raw["Close"], errors="coerce").dropna()
     if s_out.empty:
-        raise RuntimeError(f"yfinance {sym}: 유효한 종가 데이터 없음")
+        raise RuntimeError(f"yfinance {sym}: 유효한 데이터 없음")
     return s_out.sort_index()
-
-def _yf_history_with_fallback(primary: str, fallback: str, start: str, end: str,
-                               is_cumulative_fallback: bool = True) -> tuple[pd.Series, bool]:
-    """primary 심볼 시도, 실패 시 fallback 사용. (data, is_cumulative) 반환"""
-    try:
-        data = _yf_history(primary, start, end)
-        return data, False  # ^ADD/^ADN은 이미 daily diff값
-    except Exception:
-        pass
-    try:
-        data = _yf_history(fallback, start, end)
-        return data, is_cumulative_fallback  # ^NYAD/^NAAD는 누적값
-    except Exception as ex:
-        raise RuntimeError(f"브레드스 데이터 수집 실패 ({primary}, {fallback}): {ex}")
 
 @st.cache_data(show_spinner=False, ttl=3600)
 def fetch_breadth(market: str, start: str, end: str, base: float = 50000.0) -> pd.DataFrame:
     """
-    NYSE: ^ADD (일별 순등락종목수, daily net advances) → 직접 AD diff
-          fallback: ^NYAD (누적 AD Line) → diff()로 변환
-    NASDAQ: ^ADN → fallback ^NAAD
+    Stooq에서 AD Line 수집 ($nyad.i / $naad.i).
+    Stooq AD Line은 누적값 → diff()로 일별 순등락 추출.
     """
-    if not YF_OK:
-        raise RuntimeError("yfinance 미설치")
     cfg = MARKET_CFG[market]
-    ad_s, is_cumulative = _yf_history_with_fallback(
-        cfg["adv_sym"], cfg["adv_alt"], start, end, is_cumulative_fallback=True
-    )
-    if is_cumulative:
-        # 누적 AD Line에서 일별 차이 추출
-        ad_diff = ad_s.diff().fillna(0)
-    else:
-        # ^ADD / ^ADN은 이미 일별 순등락 값
-        ad_diff = ad_s.fillna(0)
-    df = pd.DataFrame({
-        "ad_diff": ad_diff.values,
-    }, index=ad_s.index)
+    ad_s = _stooq_fetch(cfg["stooq_ad"], start, end)
+    # Stooq AD Line은 누적값 — diff()로 일별 순등락 추출
+    ad_diff = ad_s.diff().fillna(0)
+    df = pd.DataFrame({"ad_diff": ad_diff.values}, index=ad_s.index)
     df["advances"] = df["ad_diff"].clip(lower=0)
     df["declines"] = (-df["ad_diff"]).clip(lower=0)
     df["ad_line"]  = base + df["ad_diff"].cumsum()
@@ -168,18 +180,16 @@ def fetch_index(market: str, start: str, end: str) -> pd.DataFrame:
 
 @st.cache_data(show_spinner=False, ttl=3600)
 def fetch_nhnl(market: str, start: str, end: str) -> pd.DataFrame | None:
-    """yfinance ^NYHGH/^NYLOW 또는 ^NAHGH/^NALO — 주봉 합산.
-    실패 시 None 반환 (NH-NL 탭에서 경고 표시)."""
-    if not YF_OK:
-        return None
+    """Stooq $nyhgh.i/$nylow.i 또는 $nahgh.i/$nalo.i — 주봉 집계.
+    실패 시 None 반환."""
     cfg = MARKET_CFG[market]
     try:
-        nhi_s = _yf_history(cfg["nhi_sym"], start, end)
-        nlo_s = _yf_history(cfg["nlo_sym"], start, end)
+        nhi_s = _stooq_fetch(cfg["stooq_nhi"], start, end)
+        nlo_s = _stooq_fetch(cfg["stooq_nlo"], start, end)
         df = pd.DataFrame({"new_highs": nhi_s, "new_lows": nlo_s}).dropna()
         if df.empty:
             return None
-        # ^NYHGH 등은 daily count — 주봉은 마지막값(last)으로 대표
+        # New Highs/Lows는 daily count — 주봉은 last()로 대표
         weekly_hi = df["new_highs"].resample("W-FRI").last()
         weekly_lo = df["new_lows"].resample("W-FRI").last()
         weekly = pd.DataFrame({"new_highs": weekly_hi, "new_lows": weekly_lo}).dropna()
