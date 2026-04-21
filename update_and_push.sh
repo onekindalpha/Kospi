@@ -4,20 +4,23 @@
 
 cd /Users/velocitygoal/Public/kospi
 
-export KRX_AUTH_KEY=6B1C3BAAFE1142C884CEB9A2599001E7CCD4E35B
+# KRX_AUTH_KEY: 환경변수 우선, 없으면 아래 값 사용
+if [ -z "$KRX_AUTH_KEY" ]; then
+    export KRX_AUTH_KEY=CBC299D478F144FEB2949C9C716BB03A6E18B441
+fi
 
 TODAY=$(date +%Y%m%d)
 mkdir -p data
 
 # ── KOSPI 브레드스 ──
 KOSPI_CSV="data/kospi_breadth.csv"
-if [ -f "$KOSPI_CSV" ]; then
+if [ -f "$KOSPI_CSV" ] && [ $(wc -l < "$KOSPI_CSV") -gt 1 ]; then
     LAST=$(tail -1 $KOSPI_CSV | cut -d',' -f1 | tr -d '\r')
     START=$(date -j -f "%Y%m%d" -v+1d "$LAST" +%Y%m%d 2>/dev/null || date -d "$LAST + 1 day" +%Y%m%d)
     echo "KOSPI 브레드스: $START ~ $TODAY (이어받기)"
 else
-    START=$(date -j -v-2y +%Y%m%d 2>/dev/null || date -d "2 years ago" +%Y%m%d)
-    echo "KOSPI 브레드스: $START ~ $TODAY (처음 수집)"
+    START=$(date -j -v-1y +%Y%m%d 2>/dev/null || date -d "1 year ago" +%Y%m%d)
+    echo "KOSPI 브레드스: $START ~ $TODAY (처음 수집, 1년치)"
 fi
 python krx_breadth_openapi_exact_v4.py --market KOSPI --start $START --end $TODAY --out $KOSPI_CSV \
     && echo "KOSPI 브레드스 저장 완료" \
@@ -25,13 +28,13 @@ python krx_breadth_openapi_exact_v4.py --market KOSPI --start $START --end $TODA
 
 # ── KOSDAQ 브레드스 ──
 KOSDAQ_CSV="data/kosdaq_breadth.csv"
-if [ -f "$KOSDAQ_CSV" ]; then
+if [ -f "$KOSDAQ_CSV" ] && [ $(wc -l < "$KOSDAQ_CSV") -gt 1 ]; then
     LAST=$(tail -1 $KOSDAQ_CSV | cut -d',' -f1 | tr -d '\r')
     START=$(date -j -f "%Y%m%d" -v+1d "$LAST" +%Y%m%d 2>/dev/null || date -d "$LAST + 1 day" +%Y%m%d)
     echo "KOSDAQ 브레드스: $START ~ $TODAY (이어받기)"
 else
-    START=$(date -j -v-2y +%Y%m%d 2>/dev/null || date -d "2 years ago" +%Y%m%d)
-    echo "KOSDAQ 브레드스: $START ~ $TODAY (처음 수집)"
+    START=$(date -j -v-1y +%Y%m%d 2>/dev/null || date -d "1 year ago" +%Y%m%d)
+    echo "KOSDAQ 브레드스: $START ~ $TODAY (처음 수집, 1년치)"
 fi
 python krx_breadth_openapi_exact_v4.py --market KOSDAQ --start $START --end $TODAY --out $KOSDAQ_CSV \
     && echo "KOSDAQ 브레드스 저장 완료" \
