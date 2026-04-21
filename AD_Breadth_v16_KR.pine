@@ -1,0 +1,170 @@
+//@version=6
+indicator("US Breadth A/D v16 KR", overlay=false, max_labels_count=100, max_lines_count=100)
+
+// ── 입력값
+market       = input.string("NYSE", "Market", options=["NYSE","NASDAQ"])
+tfBreadth    = input.timeframe("D", "Breadth timeframe")
+baseValue    = input.float(50000, "A/D Line Base Value")
+recentBars   = input.int(60, "탐색 구간 (바 수)", minval=10, maxval=300)
+showPrice    = input.bool(true,  "가격 곡선 겹쳐 표시")
+showDivLines = input.bool(true,  "불일치 연결선 표시")
+warnPct      = input.float(0.5,  "주의 기준 %", step=0.1, minval=0.0)
+dangerPct    = input.float(2.0,  "위험 기준 %", step=0.1, minval=0.0)
+
+// ── 브레드스 데이터
+advSym  = market == "NYSE" ? "USI:ADV"  : "USI:ADVQ"
+declSym = market == "NYSE" ? "USI:DECL" : "USI:DECL.NQ"
+adv  = request.security(advSym,  tfBreadth, close, gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_off, ignore_invalid_symbol=true)
+decl = request.security(declSym, tfBreadth, close, gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_off, ignore_invalid_symbol=true)
+adDiff    = nz(adv, 0) - nz(decl, 0)
+adLineRaw = baseValue + ta.cum(adDiff)
+
+// ── 가격 스케일
+priceMin    = ta.lowest(close,     recentBars * 2)
+priceMax    = ta.highest(close,    recentBars * 2)
+adMin       = ta.lowest(adLineRaw, recentBars * 2)
+adMax       = ta.highest(adLineRaw,recentBars * 2)
+priceMapped = priceMax != priceMin ? adMin + (close - priceMin) / (priceMax - priceMin) * (adMax - adMin) : adLineRaw
+
+plot(adLineRaw, "A/D Line", color=color.new(color.blue, 0), linewidth=2)
+plot(showPrice ? priceMapped : na, "Price", color=color.new(color.gray, 40), linewidth=1)
+
+// ── H_b: 최근 구간 최고점 (실시간)
+hbVal = ta.highest(close, recentBars)
+hbN   = math.abs(ta.highestbars(close, recentBars))
+hbBar = bar_index - hbN
+hbAD  = adLineRaw[hbN]
+
+// ── H_a: 이전 구간 최고점
+haVal = ta.highest(close[recentBars], recentBars)
+haN   = recentBars + math.abs(ta.highestbars(close[recentBars], recentBars))
+haBar = bar_index - haN
+haAD  = adLineRaw[haN]
+
+// ── L_b: 최근 구간 최저점 (실시간)
+lbVal = ta.lowest(close, recentBars)
+lbN   = math.abs(ta.lowestbars(close, recentBars))
+lbBar = bar_index - lbN
+lbAD  = adLineRaw[lbN]
+
+// ── L_a: 이전 구간 최저점
+laVal = ta.lowest(close[recentBars], recentBars)
+laN   = recentBars + math.abs(ta.lowestbars(close[recentBars], recentBars))
+laBar = bar_index - laN
+laAD  = adLineRaw[laN]
+
+// ── 불일치 판정
+bearDiv    = hbVal > haVal and hbAD < haAD
+bearDivPct = bearDiv and haAD != 0 ? (haAD - hbAD) / math.abs(haAD) * 100 : 0.0
+bullDiv    = lbVal < laVal and lbAD > laAD
+bullDivPct = bullDiv and laAD != 0 ? (lbAD - laAD) / math.abs(laAD) * 100 : 0.0
+
+string status      = "중립"
+string note        = ""
+color  statusColor = color.gray
+
+if bearDiv and bearDivPct >= dangerPct
+    status      := "🔴 부정적 불일치 (위험)"
+    note        := "H_b 신고점 / A/D " + str.tostring(bearDivPct, "#.##") + "% 뒤처짐"
+    statusColor := color.red
+else if bearDiv and bearDivPct >= warnPct
+    status      := "🟠 부정적 불일치 (주의)"
+    note        := "H_b 신고점 / A/D " + str.tostring(bearDivPct, "#.##") + "% 뒤처짐"
+    statusColor := color.orange
+else if bearDiv
+    status      := "🟡 초기 부정적 불일치"
+    note        := "H_b 신고점 / A/D 소폭 뒤처짐"
+    statusColor := color.yellow
+else if bullDiv and bullDivPct >= warnPct
+    status      := "🟢 긍정적 불일치 (바닥 신호)"
+    note        := "L_b 신저점 / A/D " + str.tostring(bullDivPct, "#.##") + "% 더 올라옴"
+    statusColor := color.teal
+else if bullDiv
+    status      := "🔵 초기 긍정적 불일치"
+    note        := "L_b 신저점 / A/D 소폭 상승"
+    statusColor := color.blue
+else
+    note        := "불일치 없음"
+
+bgcolor(
+  status == "🔴 부정적 불일치 (위험)"      ? color.new(color.red,    85) :
+  status == "🟠 부정적 불일치 (주의)"      ? color.new(color.orange, 88) :
+  status == "🟡 초기 부정적 불일치"        ? color.new(color.yellow, 92) :
+  status == "🟢 긍정적 불일치 (바닥 신호)" ? color.new(color.teal,   88) :
+  status == "🔵 초기 긍정적 불일치"        ? color.new(color.blue,   92) : na)
+
+// ── 라벨 & 선
+var label lblHa     = na
+var label lblHb     = na
+var label lblLa     = na
+var label lblLb     = na
+var label lblStatus = na
+var line  lineH     = na
+var line  lineL     = na
+
+if barstate.islast
+    label.delete(lblHa)
+    label.delete(lblHb)
+    label.delete(lblLa)
+    label.delete(lblLb)
+    label.delete(lblStatus)
+    line.delete(lineH)
+    line.delete(lineL)
+
+    lblHa := label.new(haBar, haAD, "H_a\n" + str.tostring(haVal, "#.##"),
+                       style=label.style_label_down,
+                       color=bearDiv ? color.new(color.red, 40) : color.new(color.gray, 40),
+                       textcolor=color.white, size=size.small)
+
+    lblHb := label.new(hbBar, hbAD, "H_b\n" + str.tostring(hbVal, "#.##"),
+                       style=label.style_label_down,
+                       color=bearDiv ? color.new(color.red, 10) : color.new(color.gray, 30),
+                       textcolor=color.white, size=size.small)
+
+    lblLa := label.new(laBar, laAD, "L_a\n" + str.tostring(laVal, "#.##"),
+                       style=label.style_label_up,
+                       color=bullDiv ? color.new(color.teal, 40) : color.new(color.gray, 40),
+                       textcolor=color.white, size=size.small)
+
+    lblLb := label.new(lbBar, lbAD, "L_b\n" + str.tostring(lbVal, "#.##"),
+                       style=label.style_label_up,
+                       color=bullDiv ? color.new(color.teal, 10) : color.new(color.gray, 30),
+                       textcolor=color.white, size=size.small)
+
+    if showDivLines
+        lineH := line.new(haBar, haAD, hbBar, hbAD,
+                          color=bearDiv ? color.new(color.red, 20) : color.new(color.gray, 60),
+                          width=2, style=line.style_dashed)
+        lineL := line.new(laBar, laAD, lbBar, lbAD,
+                          color=bullDiv ? color.new(color.teal, 20) : color.new(color.gray, 60),
+                          width=2, style=line.style_dashed)
+
+    lblStatus := label.new(bar_index, adLineRaw, status + "\n" + note,
+                           style=label.style_label_left,
+                           color=statusColor, textcolor=color.white, size=size.normal)
+
+// ── 테이블
+var table t = table.new(position.top_right, 2, 8, border_width=1)
+if barstate.islast
+    table.cell(t, 0, 0, "마켓",            bgcolor=color.new(color.gray, 80))
+    table.cell(t, 1, 0, market)
+    table.cell(t, 0, 1, "A/D (오늘)",      bgcolor=color.new(color.gray, 80))
+    table.cell(t, 1, 1, str.tostring(adDiff, "#"))
+    table.cell(t, 0, 2, "H_a (예전 고점)", bgcolor=color.new(color.gray, 80))
+    table.cell(t, 1, 2, str.tostring(haVal, "#.##"))
+    table.cell(t, 0, 3, "A/D @ H_a",       bgcolor=color.new(color.gray, 80))
+    table.cell(t, 1, 3, str.tostring(haAD, "#"))
+    table.cell(t, 0, 4, "H_b (최근 고점)", bgcolor=color.new(color.gray, 80))
+    table.cell(t, 1, 4, str.tostring(hbVal, "#.##"))
+    table.cell(t, 0, 5, "A/D @ H_b",       bgcolor=color.new(color.gray, 80))
+    table.cell(t, 1, 5, str.tostring(hbAD, "#") + (bearDiv ? "  ⚠" : "  ✓"),
+               text_color=bearDiv ? color.red : color.teal)
+    table.cell(t, 0, 6, "A/D 괴리 %",      bgcolor=color.new(color.gray, 80))
+    table.cell(t, 1, 6, str.tostring(bearDivPct, "#.##") + "%",
+               text_color=bearDivPct >= dangerPct ? color.red : bearDivPct >= warnPct ? color.orange : color.gray)
+    table.cell(t, 0, 7, "판정",             bgcolor=color.new(color.gray, 80))
+    table.cell(t, 1, 7, status, text_color=statusColor)
+
+alertcondition(bearDiv and bearDivPct >= dangerPct, title="부정적 불일치 위험", message="H_b 신고점/A/D가 H_a보다 2%+ 뒤처짐")
+alertcondition(bearDiv and bearDivPct >= warnPct,   title="부정적 불일치 주의", message="H_b 신고점/A/D가 H_a보다 뒤처짐")
+alertcondition(bullDiv and bullDivPct >= warnPct,   title="긍정적 불일치",      message="L_b 신저점/A/D는 L_a보다 올라옴")
