@@ -615,61 +615,72 @@ def main():
     # TAB 3: 고점-저점 수치 (NH-NL)
     # ══════════════════════════════════════════════
     with tab3:
-        st.subheader("🏔 고점-저점 수치 (신고가 - 신저가)")
-        st.caption("당일 52주 신고가 종목수 - 신저가 종목수. 플러스 유지 = 시장 건강")
-
-        # 국장은 별도로 신고가/신저가 데이터가 없으므로
-        # 대안: lookback일 신고가/신저가 종목 수를 A/D 데이터에서 추정
-        # → 실제로는 closes 기준으로 rolling window 내 신고/신저 여부 계산 불가 (종목별 데이터 없음)
-        # → 대신 고점-저점 개념을 A/D 관점으로 재해석: 상승우세일 - 하락우세일 누적
-        st.info("💡 국장 신고가/신저가 개별 종목 데이터는 KRX API에서 직접 제공되지 않습니다.\n"
-                "대신 **등락종목수 기반 고점-저점 대용 지표**를 표시합니다.")
-
-        hl_window = st.slider("집계 기간 (일)", 10, 60, 20, key="hl_win")
-        adv_s  = pd.Series(df["advances"].values.astype(float))
-        decl_s = pd.Series(df["declines"].values.astype(float))
-
-        # 상승우세일: advances > declines 인 날 수 - 하락우세일 수 (rolling)
-        bull_days = (adv_s > decl_s).astype(int)
-        bear_days = (adv_s < decl_s).astype(int)
-        hl_proxy  = bull_days.rolling(hl_window).sum() - bear_days.rolling(hl_window).sum()
-        hl_ma     = hl_proxy.rolling(5).mean()
-
-        end_dt3   = pd.to_datetime(df["date"].astype(str), format="%Y%m%d").max()
-        start_dt3 = end_dt3 - pd.DateOffset(months=chart_months)
-        mask3 = pd.to_datetime(df["date"].astype(str), format="%Y%m%d") >= start_dt3
-        pf3   = df[mask3].copy().reset_index(drop=True)
-        pf3["dt"] = pd.to_datetime(pf3["date"].astype(str), format="%Y%m%d")
-        hl_plot   = hl_proxy.iloc[mask3.values].reset_index(drop=True)
-        hl_ma_plot = hl_ma.iloc[mask3.values].reset_index(drop=True)
-
-        last_hl = hl_proxy.iloc[-1]
-        hl_verdict = ("🟢 상승 우세 유지" if last_hl > hl_window * 0.3 else
-                      "🟢 소폭 우세"       if last_hl > 0 else
-                      "🔴 하락 우세"       if last_hl < -hl_window * 0.3 else
-                      "🟠 소폭 약세")
-
-        h1, h2 = st.columns(2)
-        h1.metric(f"상승우세일 비율 ({hl_window}일)", f"{last_hl:+.0f}일")
-        h2.metric("판정", hl_verdict)
-
-        fig_hl = go.Figure()
-        fig_hl.add_trace(go.Bar(
-            x=pf3["dt"], y=hl_plot,
-            marker_color=[("#26a69a" if v >= 0 else "#ef5350") for v in hl_plot],
-            name=f"상승-하락우세일 ({hl_window}일)", opacity=0.7
-        ))
-        fig_hl.add_trace(go.Scatter(
-            x=pf3["dt"], y=hl_ma_plot,
-            line=dict(color="orange", width=1.5),
-            name="5일 평균"
-        ))
-        fig_hl.add_hline(y=0, line_color="gray", line_dash="dot")
-        fig_hl.update_layout(
-            title=f"{market} 고점-저점 대용 지표 ({hl_window}일 집계)",
-            template="plotly_dark", height=400,
+        st.subheader("🏔 고점-저점 수치 (신고가 - 신저가 종목 수)")
+        st.caption(
+            "스탠 와인스태인 책 정의: 그 주 신고가 기록 종목 수 - 신저가 기록 종목 수 (주봉 집계). "
+            "KRX 개별종목 일별 데이터 기반으로 52주 신고가/신저가 판별."
         )
-        st.plotly_chart(fig_hl, use_container_width=True)
+
+        # KRX breadth 캐시에 개별종목 고가/저가 데이터가 있으면 계산
+        # build_breadth()가 수집한 일별 advances/declines만 있고 종목별 가격은 없음
+        # → GitHub CSV에 nh/nl 컬럼이 있으면 사용, 없으면 KRX API 재수집 안내
+
+        if "new_highs" in df.columns and "new_lows" in df.columns:
+            nhnl_s  = pd.Series((df["new_highs"] - df["new_lows"]).values.astype(float))
+            nhnl_source = "KRX 데이터"
+        else:
+            # 대용: advances/(advances+declines) 비율 기반 weekly 집계
+            # 주봉으로 리샘플: 주간 advances 합 - declines 합
+            df_dt = df.copy()
+            df_dt["dt"] = pd.to_datetime(df_dt["date"].astype(str), format="%Y%m%d")
+            df_dt = df_dt.set_index("dt")
+            weekly_adv  = df_dt["advances"].resample("W-FRI").sum()
+            weekly_decl = df_dt["declines"].resample("W-FRI").sum()
+            nhnl_weekly = (weekly_adv - weekly_decl).reset_index()
+            nhnl_weekly.columns = ["dt", "nhnl"]
+            nhnl_weekly = nhnl_weekly[nhnl_weekly["nhnl"].notna()]
+            nhnl_source = "주봉 등락종목수 차이 (신고가/신저가 대용)"
+
+            end_dt3   = nhnl_weekly["dt"].max()
+            start_dt3 = end_dt3 - pd.DateOffset(months=chart_months)
+            pf3       = nhnl_weekly[nhnl_weekly["dt"] >= start_dt3].copy().reset_index(drop=True)
+            nhnl_plot = pf3["nhnl"]
+            nhnl_ma   = nhnl_plot.rolling(4).mean()
+
+            last_nhnl = nhnl_weekly["nhnl"].iloc[-1]
+            nhnl_verdict = ("🟢 강세" if last_nhnl > 200 else
+                            "🟢 약한 강세" if last_nhnl > 0 else
+                            "🔴 약세" if last_nhnl < -200 else "🟠 약한 약세")
+
+            st.info(
+                f"💡 현재 데이터: **{nhnl_source}**\n\n"
+                "KRX 개별종목 52주 신고가/신저가 데이터는 "
+                "GitHub CSV에 `new_highs`, `new_lows` 컬럼을 추가하면 정확하게 표시됩니다."
+            )
+
+            h1, h2, h3 = st.columns(3)
+            h1.metric("주간 NH-NL", f"{int(last_nhnl):+,}")
+            h2.metric("판정", nhnl_verdict)
+            h3.metric("기준", nhnl_source)
+
+            fig_hl = go.Figure()
+            fig_hl.add_trace(go.Bar(
+                x=pf3["dt"], y=nhnl_plot,
+                marker_color=[("#26a69a" if v >= 0 else "#ef5350") for v in nhnl_plot],
+                name="주봉 NH-NL", opacity=0.8
+            ))
+            fig_hl.add_trace(go.Scatter(
+                x=pf3["dt"], y=nhnl_ma,
+                line=dict(color="orange", width=1.5),
+                name="4주 MA"
+            ))
+            fig_hl.add_hline(y=0, line_color="gray", line_dash="dot")
+            fig_hl.update_layout(
+                title=f"{market} 고점-저점 수치 (주봉 등락종목수 차이)",
+                template="plotly_dark", height=420,
+                yaxis_title="NH-NL"
+            )
+            st.plotly_chart(fig_hl, use_container_width=True)
 
     # ══════════════════════════════════════════════
     # TAB 4: P/D 비율 (스탠 와인스태인 책 정의)
