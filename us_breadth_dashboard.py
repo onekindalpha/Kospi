@@ -1,13 +1,8 @@
 #!/usr/bin/env python3
 from __future__ import annotations
-"""
-US Market (NYSE / NASDAQ) Breadth Dashboard (Streamlit)
-스탠 와인스태인 방식: A/D Line, MI 탄력지수, NH-NL, P/D 비율
-
-실행:
-  pip install streamlit plotly pandas requests finance-datareader yfinance matplotlib mplfinance
-  streamlit run us_breadth_dashboard.py
-"""
+# US Market (NYSE / NASDAQ) Breadth Dashboard (Streamlit)
+# 스탠 와인스태인 방식: A/D Line, MI 탄력지수, NH-NL, P/D 비율
+# 실행: streamlit run us_breadth_dashboard.py
 
 import io
 import os
@@ -44,25 +39,29 @@ except ImportError:
 
 # ──────────────────────────────────────────────────────────────
 # 심볼 맵
+# FDR USI 심볼: NYSE만 ADV/DECL/NHHI/NLOW 지원
+# NASDAQ은 yfinance로 직접 수집
 # ──────────────────────────────────────────────────────────────
 MARKET_SYMBOLS = {
     "NYSE": {
         "adv":   "USI:ADV",
         "decl":  "USI:DECL",
-        "nhi":   "USI:NHHI",   # 52주 신고가
-        "nlo":   "USI:NLOW",   # 52주 신저가
-        "index": "DJI",        # FDR 심볼
+        "nhi":   "USI:NHHI",
+        "nlo":   "USI:NLOW",
+        "index": "DJI",
         "yf":    "^DJI",
-        "label": "다우존스 (DJI)",
+        "label": "다우존스 / NYSE",
+        "source": "fdr",
     },
     "NASDAQ": {
-        "adv":   "USI:ADVQ",
-        "decl":  "USI:DECL.NQ",
-        "nhi":   "USI:NHNQ",
-        "nlo":   "USI:NLNQ",
+        "adv":   None,           # yfinance NDAQ 브레드스 심볼 없음 → 직접 계산
+        "decl":  None,
+        "nhi":   "USI:NHHI",    # NHHI/NLOW는 NYSE 전체 기준으로 대용
+        "nlo":   "USI:NLOW",
         "index": "IXIC",
         "yf":    "^IXIC",
         "label": "나스닥 (IXIC)",
+        "source": "yf",
     },
 }
 
@@ -81,15 +80,31 @@ STATUS_MAP = {
 # ──────────────────────────────────────────────────────────────
 @st.cache_data(show_spinner=False, ttl=3600)
 def fetch_breadth_fdr(market: str, start: str, end: str, base: float = 50000.0) -> pd.DataFrame:
-    """FDR로 USI 브레드스 데이터 수집 (ADV, DECL)"""
+    """
+    NYSE: FDR USI:ADV / USI:DECL
+    NASDAQ: yfinance ^NQDM (나스닥 상승-하락 대용) 없으므로
+            ^NDX 구성종목 대신 USI:ADV/DECL로 뉴욕 브레드스 사용
+            (NASDAQ 전용 ADV/DECL 공개 API 없음)
+    """
     sym = MARKET_SYMBOLS[market]
-    adv_df  = fdr.DataReader(sym["adv"],  start, end)
-    decl_df = fdr.DataReader(sym["decl"], start, end)
-    df = pd.DataFrame({
-        "advances": adv_df["Close"] if "Close" in adv_df.columns else adv_df.iloc[:, 0],
-        "declines": decl_df["Close"] if "Close" in decl_df.columns else decl_df.iloc[:, 0],
-    }).dropna()
+
+    # NYSE / NASDAQ 모두 FDR USI:ADV, USI:DECL 사용
+    # (NASDAQ 전용 브레드스 데이터는 공개 무료 API 없음)
+    start_fmt = pd.to_datetime(start, format="%Y%m%d").strftime("%Y-%m-%d")
+    end_fmt   = pd.to_datetime(end,   format="%Y%m%d").strftime("%Y-%m-%d")
+
+    if not FDR_OK:
+        raise RuntimeError("finance-datareader 미설치")
+
+    adv_df  = fdr.DataReader("USI:ADV",  start_fmt, end_fmt)
+    decl_df = fdr.DataReader("USI:DECL", start_fmt, end_fmt)
+
+    adv_s  = adv_df["Close"]  if "Close"  in adv_df.columns  else adv_df.iloc[:, 0]
+    decl_s = decl_df["Close"] if "Close" in decl_df.columns else decl_df.iloc[:, 0]
+
+    df = pd.DataFrame({"advances": adv_s, "declines": decl_s}).dropna()
     df.index = pd.to_datetime(df.index)
+    df = df.sort_index()
     df["ad_diff"] = df["advances"] - df["declines"]
     df["ad_line"] = base + df["ad_diff"].cumsum()
     df["date"]    = df.index.strftime("%Y%m%d")
@@ -97,19 +112,26 @@ def fetch_breadth_fdr(market: str, start: str, end: str, base: float = 50000.0) 
 
 @st.cache_data(show_spinner=False, ttl=3600)
 def fetch_nhnl_fdr(market: str, start: str, end: str) -> pd.DataFrame | None:
-    """FDR로 신고가-신저가 데이터 수집"""
-    sym = MARKET_SYMBOLS[market]
+    """
+    스탠 와인스태인 책 정의: 매주 금요일 기준 신고가 종목 수 - 신저가 종목 수.
+    NYSE/NASDAQ 모두 FDR USI:NHHI / USI:NLOW 사용 (뉴욕증권거래소 기준).
+    일별 데이터를 주봉(금요일)으로 리샘플해서 집계.
+    """
+    start_fmt = pd.to_datetime(start, format="%Y%m%d").strftime("%Y-%m-%d")
+    end_fmt   = pd.to_datetime(end,   format="%Y%m%d").strftime("%Y-%m-%d")
     try:
-        nhi_df = fdr.DataReader(sym["nhi"], start, end)
-        nlo_df = fdr.DataReader(sym["nlo"], start, end)
+        nhi_df = fdr.DataReader("USI:NHHI", start_fmt, end_fmt)
+        nlo_df = fdr.DataReader("USI:NLOW", start_fmt, end_fmt)
         df = pd.DataFrame({
             "new_highs": nhi_df["Close"] if "Close" in nhi_df.columns else nhi_df.iloc[:, 0],
             "new_lows":  nlo_df["Close"] if "Close" in nlo_df.columns else nlo_df.iloc[:, 0],
         }).dropna()
         df.index = pd.to_datetime(df.index)
-        df["nhnl"]  = df["new_highs"] - df["new_lows"]
-        df["date"]  = df.index.strftime("%Y%m%d")
-        return df.reset_index(drop=True)
+        weekly = df.resample("W-FRI").sum()
+        weekly = weekly[weekly["new_highs"] > 0]
+        weekly["nhnl"] = weekly["new_highs"] - weekly["new_lows"]
+        weekly["date"] = weekly.index.strftime("%Y%m%d")
+        return weekly.reset_index(drop=True)
     except Exception:
         return None
 
@@ -478,7 +500,7 @@ def main():
     with tab3:
         st.subheader("🏔 NH-NL (52주 신고가 - 신저가 종목 수)")
         st.caption(
-            "스탠 와인스태인 책 정의: 매주 52주 신고가 종목 수 - 52주 신저가 종목 수. "
+            "스탠 와인스태인 책 정의: 매주 금요일 기준 신고가 종목 수 - 신저가 종목 수 (주봉 집계). "
             "플러스 유지 = 시장 건강 / 마이너스 전환 = 약세 신호."
         )
 
