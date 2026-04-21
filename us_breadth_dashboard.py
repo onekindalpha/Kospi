@@ -16,7 +16,6 @@ import matplotlib.pyplot as plt
 
 import pandas as pd
 import plotly.graph_objects as go
-import requests
 import streamlit as st
 
 try:
@@ -26,106 +25,127 @@ except ImportError:
     MPL_OK = False
 
 try:
-    import FinanceDataReader as fdr
-    FDR_OK = True
-except ImportError:
-    FDR_OK = False
-
-try:
     import yfinance as yf
     YF_OK = True
 except ImportError:
     YF_OK = False
 
+try:
+    import FinanceDataReader as fdr
+    FDR_OK = True
+except ImportError:
+    FDR_OK = False
+
 # ──────────────────────────────────────────────────────────────
 # 심볼 맵
-# FDR USI 심볼: NYSE만 ADV/DECL/NHHI/NLOW 지원
-# NASDAQ은 yfinance로 직접 수집
+# ADV/DECL: yfinance  ^ADV/^DECL (NYSE),  ^ADVQ/^DECLQ (NASDAQ)
+# NH-NL:    yfinance  ^NHNL (NYSE 52주 신고가-신저가 net)
+# 지수:     yfinance  ^DJI / ^IXIC
 # ──────────────────────────────────────────────────────────────
-MARKET_SYMBOLS = {
+MARKET_CFG = {
     "NYSE": {
-        "adv":   "USI:ADV",
-        "decl":  "USI:DECL",
-        "nhi":   "USI:NHHI",
-        "nlo":   "USI:NLOW",
-        "index": "DJI",
-        "yf":    "^DJI",
-        "label": "다우존스 / NYSE",
-        "source": "fdr",
+        "adv":   "^ADV",
+        "decl":  "^DECL",
+        "nhi":   "^HGH",    # NYSE 52주 신고가
+        "nlo":   "^LOW",    # NYSE 52주 신저가
+        "index": "^DJI",
+        "div_fallback": 0.020,
+        "label": "NYSE / 다우존스",
     },
     "NASDAQ": {
-        "adv":   None,           # yfinance NDAQ 브레드스 심볼 없음 → 직접 계산
-        "decl":  None,
-        "nhi":   "USI:NHHI",    # NHHI/NLOW는 NYSE 전체 기준으로 대용
-        "nlo":   "USI:NLOW",
-        "index": "IXIC",
-        "yf":    "^IXIC",
-        "label": "나스닥 (IXIC)",
-        "source": "yf",
+        "adv":   "^ADVQ",
+        "decl":  "^DECLQ",
+        "nhi":   "^HGHQ",   # NASDAQ 52주 신고가
+        "nlo":   "^LOWQ",   # NASDAQ 52주 신저가
+        "index": "^IXIC",
+        "div_fallback": 0.007,
+        "label": "NASDAQ",
     },
 }
 
 STATUS_MAP = {
-    "BULLISH_CONFIRMATION":          ("✅ 상승 확인",         "가격·A/D선 모두 고점 동행",         "#2e7d32"),
-    "BULLISH_DIVERGENCE":            ("🔴 부정적 불일치",      "가격 고점 / A/D선 크게 뒤처짐",      "#c62828"),
-    "BULLISH_DIVERGENCE_CANDIDATE":  ("🟠 초기 경고",          "가격이 A/D선보다 빠르게 회복 중",    "#ef6c00"),
-    "RECOVERY_IN_PROGRESS":          ("🟡 회복 진행 중",        "고점 재공략 중, A/D 미확인",         "#f9a825"),
-    "DOWNSIDE_DIVERGENCE_CANDIDATE": ("🟢 긍정적 불일치",       "가격 저점 / A/D선은 더 올라옴",      "#00838f"),
-    "NORMAL_WEAKNESS":               ("⚫ 전반적 약세",          "가격·A/D선 모두 저점",               "#455a64"),
-    "NEUTRAL":                       ("⬜ 중립",                "뚜렷한 신호 없음",                    "#757575"),
+    "BULLISH_CONFIRMATION":          ("✅ 상승 확인",        "가격·A/D선 모두 고점 동행",       "#2e7d32"),
+    "BULLISH_DIVERGENCE":            ("🔴 부정적 불일치",     "가격 고점 / A/D선 크게 뒤처짐",   "#c62828"),
+    "BULLISH_DIVERGENCE_CANDIDATE":  ("🟠 초기 경고",         "가격이 A/D선보다 빠르게 회복",    "#ef6c00"),
+    "RECOVERY_IN_PROGRESS":          ("🟡 회복 진행 중",       "고점 재공략 중, A/D 미확인",      "#f9a825"),
+    "DOWNSIDE_DIVERGENCE_CANDIDATE": ("🟢 긍정적 불일치",      "가격 저점 / A/D선은 더 올라옴",   "#00838f"),
+    "NORMAL_WEAKNESS":               ("⚫ 전반적 약세",         "가격·A/D선 모두 저점",            "#455a64"),
+    "NEUTRAL":                       ("⬜ 중립",               "뚜렷한 신호 없음",                 "#757575"),
 }
+
+# ──────────────────────────────────────────────────────────────
+# yfinance 헬퍼
+# ──────────────────────────────────────────────────────────────
+def _yf_close(sym: str, start: str, end: str) -> pd.Series:
+    """yfinance로 종가 Series 반환. start/end는 YYYYMMDD"""
+    s = pd.to_datetime(start, format="%Y%m%d").strftime("%Y-%m-%d")
+    e = (pd.to_datetime(end, format="%Y%m%d") + timedelta(days=1)).strftime("%Y-%m-%d")
+    raw = yf.download(sym, start=s, end=e, auto_adjust=True, progress=False)
+    if raw.empty:
+        raise RuntimeError(f"yfinance {sym} 데이터 없음")
+    if isinstance(raw.columns, pd.MultiIndex):
+        raw.columns = ["_".join(c).strip() for c in raw.columns]
+    col = next((c for c in raw.columns if "close" in c.lower()), None)
+    if col is None:
+        col = raw.columns[0]
+    s_out = raw[col].dropna()
+    s_out.index = pd.to_datetime(s_out.index)
+    return s_out.sort_index()
 
 # ──────────────────────────────────────────────────────────────
 # 데이터 수집
 # ──────────────────────────────────────────────────────────────
 @st.cache_data(show_spinner=False, ttl=3600)
-def fetch_breadth_fdr(market: str, start: str, end: str, base: float = 50000.0) -> pd.DataFrame:
-    """
-    NYSE: FDR USI:ADV / USI:DECL
-    NASDAQ: yfinance ^NQDM (나스닥 상승-하락 대용) 없으므로
-            ^NDX 구성종목 대신 USI:ADV/DECL로 뉴욕 브레드스 사용
-            (NASDAQ 전용 ADV/DECL 공개 API 없음)
-    """
-    sym = MARKET_SYMBOLS[market]
-
-    # NYSE / NASDAQ 모두 FDR USI:ADV, USI:DECL 사용
-    # (NASDAQ 전용 브레드스 데이터는 공개 무료 API 없음)
-    start_fmt = pd.to_datetime(start, format="%Y%m%d").strftime("%Y-%m-%d")
-    end_fmt   = pd.to_datetime(end,   format="%Y%m%d").strftime("%Y-%m-%d")
-
-    if not FDR_OK:
-        raise RuntimeError("finance-datareader 미설치")
-
-    adv_df  = fdr.DataReader("USI:ADV",  start_fmt, end_fmt)
-    decl_df = fdr.DataReader("USI:DECL", start_fmt, end_fmt)
-
-    adv_s  = adv_df["Close"]  if "Close"  in adv_df.columns  else adv_df.iloc[:, 0]
-    decl_s = decl_df["Close"] if "Close" in decl_df.columns else decl_df.iloc[:, 0]
-
+def fetch_breadth(market: str, start: str, end: str, base: float = 50000.0) -> pd.DataFrame:
+    """yfinance ^ADV/^DECL (NYSE) 또는 ^ADVQ/^DECLQ (NASDAQ)"""
+    if not YF_OK:
+        raise RuntimeError("yfinance 미설치")
+    cfg = MARKET_CFG[market]
+    adv_s  = _yf_close(cfg["adv"],  start, end)
+    decl_s = _yf_close(cfg["decl"], start, end)
     df = pd.DataFrame({"advances": adv_s, "declines": decl_s}).dropna()
-    df.index = pd.to_datetime(df.index)
-    df = df.sort_index()
     df["ad_diff"] = df["advances"] - df["declines"]
     df["ad_line"] = base + df["ad_diff"].cumsum()
     df["date"]    = df.index.strftime("%Y%m%d")
     return df.reset_index(drop=True)
 
 @st.cache_data(show_spinner=False, ttl=3600)
-def fetch_nhnl_fdr(market: str, start: str, end: str) -> pd.DataFrame | None:
+def fetch_index(market: str, start: str, end: str) -> pd.DataFrame:
+    """yfinance 지수 OHLC"""
+    if not YF_OK:
+        raise RuntimeError("yfinance 미설치")
+    cfg = MARKET_CFG[market]
+    s = pd.to_datetime(start, format="%Y%m%d").strftime("%Y-%m-%d")
+    e = (pd.to_datetime(end, format="%Y%m%d") + timedelta(days=1)).strftime("%Y-%m-%d")
+    raw = yf.download(cfg["index"], start=s, end=e, auto_adjust=True, progress=False)
+    if raw.empty:
+        raise RuntimeError(f"{cfg['index']} 데이터 없음")
+    if isinstance(raw.columns, pd.MultiIndex):
+        raw.columns = ["_".join(c).strip() for c in raw.columns]
+    raw.columns = [c.lower().split("_")[0] for c in raw.columns]
+    raw.index = pd.to_datetime(raw.index)
+    out = pd.DataFrame({
+        "date":  raw.index.strftime("%Y%m%d"),
+        "open":  pd.to_numeric(raw.get("open",  raw.iloc[:, 0]), errors="coerce"),
+        "high":  pd.to_numeric(raw.get("high",  raw.iloc[:, 0]), errors="coerce"),
+        "low":   pd.to_numeric(raw.get("low",   raw.iloc[:, 0]), errors="coerce"),
+        "close": pd.to_numeric(raw.get("close", raw.iloc[:, 0]), errors="coerce"),
+    })
+    return out.dropna(subset=["close"]).reset_index(drop=True)
+
+@st.cache_data(show_spinner=False, ttl=3600)
+def fetch_nhnl(market: str, start: str, end: str) -> pd.DataFrame | None:
     """
-    스탠 와인스태인 책 정의: 매주 금요일 기준 신고가 종목 수 - 신저가 종목 수.
-    NYSE/NASDAQ 모두 FDR USI:NHHI / USI:NLOW 사용 (뉴욕증권거래소 기준).
-    일별 데이터를 주봉(금요일)으로 리샘플해서 집계.
+    yfinance ^HGH/^LOW (NYSE) 또는 ^HGHQ/^LOWQ (NASDAQ) →
+    일별 신고가/신저가 종목 수 → 주봉(금요일) 합산
     """
-    start_fmt = pd.to_datetime(start, format="%Y%m%d").strftime("%Y-%m-%d")
-    end_fmt   = pd.to_datetime(end,   format="%Y%m%d").strftime("%Y-%m-%d")
+    if not YF_OK:
+        return None
+    cfg = MARKET_CFG[market]
     try:
-        nhi_df = fdr.DataReader("USI:NHHI", start_fmt, end_fmt)
-        nlo_df = fdr.DataReader("USI:NLOW", start_fmt, end_fmt)
-        df = pd.DataFrame({
-            "new_highs": nhi_df["Close"] if "Close" in nhi_df.columns else nhi_df.iloc[:, 0],
-            "new_lows":  nlo_df["Close"] if "Close" in nlo_df.columns else nlo_df.iloc[:, 0],
-        }).dropna()
+        nhi_s = _yf_close(cfg["nhi"], start, end)
+        nlo_s = _yf_close(cfg["nlo"], start, end)
+        df = pd.DataFrame({"new_highs": nhi_s, "new_lows": nlo_s}).dropna()
         df.index = pd.to_datetime(df.index)
         weekly = df.resample("W-FRI").sum()
         weekly = weekly[weekly["new_highs"] > 0]
@@ -135,69 +155,55 @@ def fetch_nhnl_fdr(market: str, start: str, end: str) -> pd.DataFrame | None:
     except Exception:
         return None
 
-@st.cache_data(show_spinner=False, ttl=3600)
-def fetch_index_fdr(market: str, start: str, end: str) -> pd.DataFrame:
-    """FDR로 지수 OHLC"""
-    sym = MARKET_SYMBOLS[market]["index"]
-    raw = fdr.DataReader(sym, start, end)
-    raw.index = pd.to_datetime(raw.index)
-    raw.columns = [str(c).strip().title() for c in raw.columns]
-    close_col = next((c for c in raw.columns if c.lower() in ("close", "adj close")), None)
-    open_col  = next((c for c in raw.columns if c.lower() == "open"),  None)
-    high_col  = next((c for c in raw.columns if c.lower() == "high"),  None)
-    low_col   = next((c for c in raw.columns if c.lower() == "low"),   None)
-    out = pd.DataFrame({
-        "date":  raw.index.strftime("%Y%m%d"),
-        "open":  pd.to_numeric(raw[open_col],  errors="coerce") if open_col  else float("nan"),
-        "high":  pd.to_numeric(raw[high_col],  errors="coerce") if high_col  else float("nan"),
-        "low":   pd.to_numeric(raw[low_col],   errors="coerce") if low_col   else float("nan"),
-        "close": pd.to_numeric(raw[close_col], errors="coerce"),
-    })
-    return out.dropna(subset=["close"]).reset_index(drop=True)
-
 @st.cache_data(show_spinner=False, ttl=86400)
-def fetch_pd_us(market: str, months: int):
-    """P/D 비율: 지수 종가 ÷ (종가 × 연배당수익률) = 1 / 배당수익률"""
-    if not FDR_OK:
-        return None, "finance-datareader 미설치"
+def fetch_pd(market: str, months: int):
+    """
+    P/D = 지수 종가 ÷ 연간 실제 배당금.
+    yfinance ticker.history + ticker.dividends로 실제 배당금 시계열 수집.
+    rolling 365일 합산으로 연간 배당금 계산 → 시간에 따라 움직이는 P/D 차트.
+    """
+    if not YF_OK:
+        return None, "yfinance 미설치"
     try:
+        cfg     = MARKET_CFG[market]
         end_d   = datetime.today()
-        start_d = end_d - timedelta(days=max(365 * 5, months * 35))
-        sym_fdr = MARKET_SYMBOLS[market]["index"]
-        raw = fdr.DataReader(sym_fdr,
-                             start_d.strftime("%Y-%m-%d"),
-                             end_d.strftime("%Y-%m-%d"))
-        if raw.empty:
-            return None, f"{sym_fdr} 데이터 없음"
-        raw.index = pd.to_datetime(raw.index)
-        raw.columns = [str(c).strip().title() for c in raw.columns]
-        close_col = next((c for c in raw.columns if c.lower() in ("close", "adj close")), None)
-        weekly = raw[[close_col]].resample("W-FRI").last().dropna()
-        weekly.columns = ["close"]
+        start_d = end_d - timedelta(days=max(365 * 6, months * 35))
+        ticker  = yf.Ticker(cfg["index"])
 
-        # yfinance로 배당수익률
-        div_yield_val = None
-        if YF_OK:
-            try:
-                yf_sym = MARKET_SYMBOLS[market]["yf"]
-                info   = yf.Ticker(yf_sym).info
-                dy     = info.get("trailingAnnualDividendYield") or info.get("dividendYield")
-                if dy and dy > 0:
-                    div_yield_val = float(dy)
-            except Exception:
-                pass
-        if div_yield_val is None:
-            fallback = {"NYSE": 0.020, "NASDAQ": 0.007}
-            div_yield_val = fallback.get(market, 0.018)
+        # 종가
+        price_raw = ticker.history(start=start_d.strftime("%Y-%m-%d"),
+                                   end=end_d.strftime("%Y-%m-%d"), auto_adjust=True)
+        if price_raw.empty:
+            return None, f"{cfg['index']} 가격 데이터 없음"
+        price_raw.index = pd.to_datetime(price_raw.index).tz_localize(None)
+        close_s = price_raw["Close"].sort_index()
 
-        weekly["div_yield"]    = div_yield_val
-        weekly["dividend_est"] = weekly["close"] * weekly["div_yield"]
-        weekly["pd_ratio"]     = weekly["close"] / weekly["dividend_est"].replace(0, float("nan"))
-        weekly = weekly.reset_index()
-        weekly.columns = ["date", "close", "div_yield", "dividend_est", "pd_ratio"]
-        return weekly, None
-    except Exception as e:
-        return None, str(e)
+        # 실제 배당금 시계열
+        divs = ticker.dividends
+        if divs is not None and not divs.empty:
+            divs.index = pd.to_datetime(divs.index).tz_localize(None)
+            divs = divs.sort_index()
+            divs_daily  = divs.reindex(close_s.index, fill_value=0.0)
+            annual_div  = divs_daily.rolling(365, min_periods=1).sum()
+        else:
+            annual_div = close_s * cfg["div_fallback"]
+
+        # 주봉 리샘플
+        weekly_close = close_s.resample("W-FRI").last().dropna()
+        weekly_div   = annual_div.resample("W-FRI").last().reindex(weekly_close.index).ffill()
+        weekly_div   = weekly_div.replace(0, float("nan"))
+        pd_ratio     = weekly_close / weekly_div
+
+        out = pd.DataFrame({
+            "date":         weekly_close.index.strftime("%Y%m%d"),
+            "close":        weekly_close.values,
+            "dividend_est": weekly_div.values,
+            "pd_ratio":     pd_ratio.values,
+        }).dropna(subset=["pd_ratio"])
+        out["div_yield"] = out["dividend_est"] / out["close"]
+        return out.reset_index(drop=True), None
+    except Exception as ex:
+        return None, str(ex)
 
 # ──────────────────────────────────────────────────────────────
 # 판정
@@ -209,12 +215,12 @@ def classify(price_off_high, ad_off_high, gap,
     ah = ad_off_high    >= -ad_thr
     pl = price_off_low  <= price_thr
     al = ad_off_low     <= ad_thr
-    if ph and ah and gap >= -1.0:       return "BULLISH_CONFIRMATION"
-    if ph and gap <= -gap_danger:       return "BULLISH_DIVERGENCE"
-    if gap <= -gap_warn:                return "BULLISH_DIVERGENCE_CANDIDATE"
-    if gap < -1.0:                      return "RECOVERY_IN_PROGRESS"
-    if pl and not al:                   return "DOWNSIDE_DIVERGENCE_CANDIDATE"
-    if pl and al:                       return "NORMAL_WEAKNESS"
+    if ph and ah and gap >= -1.0:     return "BULLISH_CONFIRMATION"
+    if ph and gap <= -gap_danger:     return "BULLISH_DIVERGENCE"
+    if gap <= -gap_warn:              return "BULLISH_DIVERGENCE_CANDIDATE"
+    if gap < -1.0:                    return "RECOVERY_IN_PROGRESS"
+    if pl and not al:                 return "DOWNSIDE_DIVERGENCE_CANDIDATE"
+    if pl and al:                     return "NORMAL_WEAKNESS"
     return "NEUTRAL"
 
 def compute_signals(df, lookback, price_thr, ad_thr, gap_warn, gap_danger):
@@ -223,12 +229,12 @@ def compute_signals(df, lookback, price_thr, ad_thr, gap_warn, gap_danger):
     window   = closes[-lookback:]
     peak_idx = window.argmax()
     days_ago = lookback - 1 - peak_idx
-    price_high   = window[peak_idx]
-    ad_at_peak   = ad_lines[-(days_ago + 1)]
-    last_close   = closes[-1]
-    last_ad      = ad_lines[-1]
-    price_low    = closes[-lookback:].min()
-    ad_low       = ad_lines[-lookback:].min()
+    price_high  = window[peak_idx]
+    ad_at_peak  = ad_lines[-(days_ago + 1)]
+    last_close  = closes[-1]
+    last_ad     = ad_lines[-1]
+    price_low   = closes[-lookback:].min()
+    ad_low      = ad_lines[-lookback:].min()
 
     price_off     = (last_close - price_high) / abs(price_high) * 100 if price_high else float("nan")
     ad_off        = (last_ad   - ad_at_peak)  / abs(ad_at_peak) * 100 if ad_at_peak else float("nan")
@@ -256,7 +262,7 @@ def make_chart_img(df, market, sig, chart_months):
     pf       = df[mask].copy().reset_index(drop=True)
     pf["dt"] = pd.to_datetime(pf["date"].astype(str), format="%Y%m%d")
 
-    ohlc      = pf[["dt","open","high","low","close"]].copy()
+    ohlc       = pf[["dt","open","high","low","close"]].copy()
     ohlc["dn"] = ohlc["dt"].map(mdates.date2num)
     ohlc_vals  = ohlc[["dn","open","high","low","close"]].values
 
@@ -278,7 +284,7 @@ def make_chart_img(df, market, sig, chart_months):
     else:
         ax1.plot(pf["dt"], pf["close"].astype(float), color="#26a69a", linewidth=1.5)
 
-    ax1.set_title(f"{MARKET_SYMBOLS[market]['label']}", color="#e0e0e0", fontsize=13)
+    ax1.set_title(MARKET_CFG[market]["label"], color="#e0e0e0", fontsize=13)
     ax1.set_ylabel("Index", color="#aaaaaa")
     ax1.grid(True, color="#1e2530", linewidth=0.5)
     ax1.axvline(peak_dn, color="orange", linestyle=":", linewidth=1.2, alpha=0.6)
@@ -330,15 +336,15 @@ def main():
         st.header("⚙️ 설정")
         market = st.selectbox("마켓", ["NYSE", "NASDAQ"])
 
-        today     = datetime.today()
-        start_dt  = st.date_input("시작일", value=today - timedelta(days=730))
-        end_dt    = st.date_input("종료일", value=today)
+        today    = datetime.today()
+        start_dt = st.date_input("시작일", value=today - timedelta(days=730))
+        end_dt   = st.date_input("종료일", value=today)
         fetch_btn = st.button("🔄 데이터 불러오기", type="primary", use_container_width=True)
 
         st.divider()
         st.subheader("분석 파라미터")
         lookback     = st.slider("Lookback (일)",       20, 252, 126)
-        chart_months = st.slider("차트 표시 기간 (월)",  1,  24,  6)
+        chart_months = st.slider("차트 표시 기간 (월)",  1,  24,   6)
         with st.expander("임계값 세부 설정"):
             price_thr  = st.number_input("가격 고점 근접 기준 %", value=2.0,  step=0.1)
             ad_thr     = st.number_input("A/D 고점 근접 기준 %",  value=3.0,  step=0.1)
@@ -350,16 +356,16 @@ def main():
         return
 
     if fetch_btn:
-        if not FDR_OK:
-            st.error("finance-datareader 미설치: pip install finance-datareader")
+        if not YF_OK:
+            st.error("yfinance 미설치: pip install yfinance")
             return
         start_str = start_dt.strftime("%Y%m%d")
         end_str   = end_dt.strftime("%Y%m%d")
         try:
             with st.spinner("브레드스 데이터 수집 중…"):
-                breadth_df = fetch_breadth_fdr(market, start_str, end_str)
+                breadth_df = fetch_breadth(market, start_str, end_str)
             with st.spinner("지수 OHLC 수집 중…"):
-                index_df   = fetch_index_fdr(market, start_str, end_str)
+                index_df   = fetch_index(market, start_str, end_str)
             df = breadth_df.merge(
                 index_df[["date","open","high","low","close"]],
                 on="date", how="inner"
@@ -369,7 +375,7 @@ def main():
             st.session_state["us_df_market"] = market
 
             with st.spinner("NH-NL 수집 중…"):
-                nhnl_df = fetch_nhnl_fdr(market, start_str, end_str)
+                nhnl_df = fetch_nhnl(market, start_str, end_str)
             st.session_state["us_nhnl"] = nhnl_df
         except Exception as e:
             st.error(f"데이터 수집 실패: {e}")
@@ -435,13 +441,10 @@ def main():
                 use_container_width=True,
             )
 
-    # ══ TAB 2: MI 탄력지수 (스탠 와인스태인 책 정의) ══
+    # ══ TAB 2: MI 탄력지수 ══
     with tab2:
         st.subheader("⚡ MI 탄력지수 (Momentum Index)")
-        st.caption(
-            "스탠 와인스태인 책 정의: 등락종목수 차이(AD)의 200일 롤링 평균. "
-            "0선 위 = 시장 강세, 0선 아래 = 시장 약세."
-        )
+        st.caption("스탠 와인스태인 책 정의: 등락종목수 차이(AD)의 200일 롤링 평균. 0선 위 = 강세.")
 
         mi_window = st.slider("MA 기간 (기본 200일)", 50, 300, 200, step=10, key="us_mi_win")
 
@@ -455,24 +458,19 @@ def main():
         mi_full   = ad_diff_s.rolling(mi_window).mean()
         mi_plot   = mi_full.iloc[mask2.values].reset_index(drop=True)
 
-        last_mi  = mi_full.iloc[-1]
-        prev_mi  = mi_full.iloc[-2] if len(mi_full) >= 2 else last_mi
+        last_mi = mi_full.iloc[-1]
+        prev_mi = mi_full.iloc[-2] if len(mi_full) >= 2 else last_mi
 
         if pd.isna(last_mi):
-            mi_verdict = "⚪ 데이터 부족"
-            mi_color   = "#757575"
+            mi_verdict, mi_color = "⚪ 데이터 부족", "#757575"
         elif last_mi > 0 and last_mi > prev_mi:
-            mi_verdict = "🟢 강세 상승"
-            mi_color   = "#2e7d32"
+            mi_verdict, mi_color = "🟢 강세 상승", "#2e7d32"
         elif last_mi > 0:
-            mi_verdict = "🟡 강세 둔화"
-            mi_color   = "#f9a825"
+            mi_verdict, mi_color = "🟡 강세 둔화", "#f9a825"
         elif last_mi < 0 and last_mi < prev_mi:
-            mi_verdict = "🔴 약세 하락"
-            mi_color   = "#c62828"
+            mi_verdict, mi_color = "🔴 약세 하락", "#c62828"
         else:
-            mi_verdict = "🟠 약세 회복 중"
-            mi_color   = "#ef6c00"
+            mi_verdict, mi_color = "🟠 약세 회복 중", "#ef6c00"
 
         m1, m2, m3 = st.columns(3)
         m1.metric(f"MI ({mi_window}일 평균)", f"{last_mi:+.1f}" if not pd.isna(last_mi) else "N/A")
@@ -487,22 +485,18 @@ def main():
         ))
         fig_mi.add_hline(y=0, line_color="gray", line_dash="dot", annotation_text="기준선(0)")
         fig_mi.update_layout(
-            title=f"{market} MI 탄력지수 — AD차이 {mi_window}일 롤링 평균 (스탠 와인스태인)",
-            template="plotly_dark", height=420,
-            yaxis_title="MI 값 (AD 평균)"
+            title=f"{market} MI 탄력지수 — AD차이 {mi_window}일 롤링 평균",
+            template="plotly_dark", height=420, yaxis_title="MI 값"
         )
         st.plotly_chart(fig_mi, use_container_width=True)
 
         if len(df) < mi_window:
-            st.warning(f"⚠️ 데이터 {len(df)}일 — {mi_window}일 평균에 데이터가 부족합니다.")
+            st.warning(f"⚠️ 데이터 {len(df)}일 — {mi_window}일 평균에 데이터 부족.")
 
-    # ══ TAB 3: NH-NL (신고가 - 신저가) ══
+    # ══ TAB 3: NH-NL ══
     with tab3:
         st.subheader("🏔 NH-NL (52주 신고가 - 신저가 종목 수)")
-        st.caption(
-            "스탠 와인스태인 책 정의: 매주 금요일 기준 신고가 종목 수 - 신저가 종목 수 (주봉 집계). "
-            "플러스 유지 = 시장 건강 / 마이너스 전환 = 약세 신호."
-        )
+        st.caption("스탠 와인스태인 책 정의: 매주 신고가 종목 수 - 신저가 종목 수 (주봉 집계).")
 
         if nhnl_df is not None and not nhnl_df.empty:
             end_dt3   = pd.to_datetime(nhnl_df["date"].astype(str), format="%Y%m%d").max()
@@ -511,23 +505,22 @@ def main():
             pf3       = nhnl_df[mask3].copy().reset_index(drop=True)
             pf3["dt"] = pd.to_datetime(pf3["date"].astype(str), format="%Y%m%d")
 
-            nhnl_s    = pd.Series(nhnl_df["nhnl"].values.astype(float))
-            nhnl_ma   = nhnl_s.rolling(10).mean()
-            nhnl_plot = pf3["nhnl"]
-            nhnl_ma_plot = nhnl_ma.iloc[mask3.values].reset_index(drop=True)
+            nhnl_s       = pd.Series(nhnl_df["nhnl"].values.astype(float))
+            nhnl_plot    = pf3["nhnl"]
+            nhnl_ma_plot = nhnl_s.rolling(10).mean().iloc[mask3.values].reset_index(drop=True)
 
-            last_nhnl = nhnl_s.iloc[-1]
-            last_nh   = nhnl_df["new_highs"].iloc[-1]
-            last_nl   = nhnl_df["new_lows"].iloc[-1]
-            nhnl_verdict = ("🟢 강세" if last_nhnl > 100 else
-                            "🟢 약한 강세" if last_nhnl > 0 else
-                            "🔴 약세" if last_nhnl < -100 else "🟠 약한 약세")
+            last_nhnl = int(nhnl_s.iloc[-1])
+            last_nh   = int(nhnl_df["new_highs"].iloc[-1])
+            last_nl   = int(nhnl_df["new_lows"].iloc[-1])
+            nhnl_verdict = ("🟢 강세"      if last_nhnl > 100 else
+                            "🟢 약한 강세" if last_nhnl > 0   else
+                            "🔴 약세"      if last_nhnl < -100 else "🟠 약한 약세")
 
             n1, n2, n3, n4 = st.columns(4)
-            n1.metric("신고가 종목",  f"{int(last_nh):,}")
-            n2.metric("신저가 종목",  f"{int(last_nl):,}")
-            n3.metric("NH-NL",        f"{int(last_nhnl):+,}")
-            n4.metric("판정",          nhnl_verdict)
+            n1.metric("신고가 종목", f"{last_nh:,}")
+            n2.metric("신저가 종목", f"{last_nl:,}")
+            n3.metric("NH-NL",       f"{last_nhnl:+,}")
+            n4.metric("판정",         nhnl_verdict)
 
             fig_nhnl = go.Figure()
             fig_nhnl.add_trace(go.Bar(
@@ -537,24 +530,18 @@ def main():
             ))
             fig_nhnl.add_trace(go.Scatter(
                 x=pf3["dt"], y=nhnl_ma_plot,
-                line=dict(color="orange", width=1.5),
-                name="10일 MA"
+                line=dict(color="orange", width=1.5), name="10주 MA"
             ))
             fig_nhnl.add_hline(y=0, line_color="gray", line_dash="dot")
             fig_nhnl.update_layout(
-                title=f"{market} NH-NL (52주 신고가 - 신저가)",
-                template="plotly_dark", height=420,
-                yaxis_title="NH-NL 종목 수"
+                title=f"{market} NH-NL (52주 신고가 - 신저가, 주봉)",
+                template="plotly_dark", height=420, yaxis_title="NH-NL 종목 수"
             )
             st.plotly_chart(fig_nhnl, use_container_width=True)
         else:
-            st.warning(
-                f"NH-NL 데이터를 가져오지 못했습니다 "
-                f"(심볼: {MARKET_SYMBOLS[market]['nhi']}, {MARKET_SYMBOLS[market]['nlo']}). "
-                "데이터 불러오기를 다시 눌러주세요."
-            )
+            st.warning("NH-NL 데이터를 가져오지 못했습니다. 데이터 불러오기를 다시 눌러주세요.")
 
-    # ══ TAB 4: P/D 비율 (스탠 와인스태인 책 정의) ══
+    # ══ TAB 4: P/D 비율 ══
     with tab4:
         st.subheader("📊 P/D 비율 (Price ÷ Dividend)")
         st.caption(
@@ -562,12 +549,12 @@ def main():
             "26 이상 = 위험 / 14~17 = 정상 구간."
         )
 
-        pd_ma_n       = st.slider("MA 기간 (주)", 4, 52, 13, key="us_pd_ma")
+        pd_ma_n        = st.slider("MA 기간 (주)", 4, 52, 13, key="us_pd_ma")
         pd_danger_high = st.number_input("위험 기준 (이상)", value=26.0, step=1.0, key="us_pd_dh")
         pd_normal_low  = st.number_input("정상 하단",        value=14.0, step=1.0, key="us_pd_nl")
 
         with st.spinner("P/D 데이터 로딩 중…"):
-            pd_df, pd_err = fetch_pd_us(market, chart_months)
+            pd_df, pd_err = fetch_pd(market, chart_months)
 
         if pd_err:
             st.error(f"P/D 오류: {pd_err}")
@@ -585,14 +572,14 @@ def main():
                            pd_df["date"] >= start_pd
                          ].reset_index(drop=True)
 
-            last_pd       = pd_ratio_s.iloc[-1]
+            last_pd        = pd_ratio_s.iloc[-1]
             last_div_yield = pd_df["div_yield"].iloc[-1]
-            last_close    = pd_df["close"].iloc[-1]
+            last_close     = pd_df["close"].iloc[-1]
 
-            pd_verdict = ("🔴 위험"    if not pd.isna(last_pd) and last_pd >= pd_danger_high else
-                          "🟡 주의"    if not pd.isna(last_pd) and last_pd >= pd_danger_high * 0.85 else
-                          "🟢 정상"    if not pd.isna(last_pd) and last_pd >= pd_normal_low  else
-                          "🟢 저평가"  if not pd.isna(last_pd) else "⚪ N/A")
+            pd_verdict = ("🔴 위험"   if not pd.isna(last_pd) and last_pd >= pd_danger_high else
+                          "🟡 주의"   if not pd.isna(last_pd) and last_pd >= pd_danger_high * 0.85 else
+                          "🟢 정상"   if not pd.isna(last_pd) and last_pd >= pd_normal_low  else
+                          "🟢 저평가" if not pd.isna(last_pd) else "⚪ N/A")
 
             p1, p2, p3, p4 = st.columns(4)
             p1.metric("지수 종가",    f"{last_close:,.2f}")
@@ -600,10 +587,8 @@ def main():
             p3.metric("P/D 비율",     f"{last_pd:.1f}" if not pd.isna(last_pd) else "N/A")
             p4.metric("판정",          pd_verdict)
 
-            st.info(
-                "📌 배당금(D) = 지수 종가 × 연간 배당수익률 (yfinance 또는 역사적 평균값). "
-                "P/D = 종가 ÷ 배당금. **26 이상 = 위험**, **14~17 = 정상** (스탠 와인스태인)."
-            )
+            st.info("📌 배당금(D) = 지수 종가 × 연간 배당수익률. P/D = 종가 ÷ 배당금. "
+                    "**26 이상 = 위험**, **14~17 = 정상** (스탠 와인스태인).")
 
             fig_pd = go.Figure()
             fig_pd.add_hrect(
@@ -620,8 +605,7 @@ def main():
             )
             fig_pd.add_trace(go.Scatter(
                 x=pf4["date"], y=pd_plot,
-                line=dict(color="#42a5f5", width=2),
-                name="P/D 비율"
+                line=dict(color="#42a5f5", width=2), name="P/D 비율"
             ))
             fig_pd.add_trace(go.Scatter(
                 x=pf4["date"], y=pd_ma_plot,
