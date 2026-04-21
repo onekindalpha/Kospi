@@ -95,14 +95,43 @@ def _yf_close(sym: str, start: str, end: str) -> pd.Series:
 # ──────────────────────────────────────────────────────────────
 # 데이터 수집
 # ──────────────────────────────────────────────────────────────
+def _stooq_get(symbol: str, start: str, end: str) -> pd.Series:
+    """
+    Stooq에서 데이터 가져오기 (requests).
+    NYSE 브레드스: $ADVN (advances), $DECLN (declines)
+    NASDAQ 브레드스: $ADVQ, $DECLQ
+    start/end: YYYYMMDD
+    """
+    import requests as _req
+    s = pd.to_datetime(start, format="%Y%m%d").strftime("%Y%m%d")
+    e = pd.to_datetime(end,   format="%Y%m%d").strftime("%Y%m%d")
+    url = f"https://stooq.com/q/d/l/?s={symbol.lower()}&d1={s}&d2={e}&i=d"
+    r = _req.get(url, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
+    if r.status_code != 200 or "No data" in r.text or len(r.text) < 50:
+        raise RuntimeError(f"Stooq {symbol} 데이터 없음")
+    from io import StringIO
+    df = pd.read_csv(StringIO(r.text))
+    df.columns = [c.strip().lower() for c in df.columns]
+    df["date"] = pd.to_datetime(df["date"])
+    df = df.set_index("date").sort_index()
+    close_col = next((c for c in df.columns if "close" in c), df.columns[-1])
+    return pd.to_numeric(df[close_col], errors="coerce").dropna()
+
 @st.cache_data(show_spinner=False, ttl=3600)
 def fetch_breadth(market: str, start: str, end: str, base: float = 50000.0) -> pd.DataFrame:
-    """yfinance ^ADV/^DECL (NYSE) 또는 ^ADVQ/^DECLQ (NASDAQ)"""
-    if not YF_OK:
-        raise RuntimeError("yfinance 미설치")
-    cfg = MARKET_CFG[market]
-    adv_s  = _yf_close(cfg["adv"],  start, end)
-    decl_s = _yf_close(cfg["decl"], start, end)
+    """
+    Stooq로 NYSE/NASDAQ 브레드스 수집.
+    NYSE:   $ADVN / $DECLN
+    NASDAQ: $ADVQ / $DECLQ
+    """
+    if market == "NYSE":
+        adv_sym, decl_sym = "$advn", "$decln"
+    else:
+        adv_sym, decl_sym = "$advq", "$declq"
+
+    adv_s  = _stooq_get(adv_sym,  start, end)
+    decl_s = _stooq_get(decl_sym, start, end)
+
     df = pd.DataFrame({"advances": adv_s, "declines": decl_s}).dropna()
     df["ad_diff"] = df["advances"] - df["declines"]
     df["ad_line"] = base + df["ad_diff"].cumsum()
@@ -111,40 +140,39 @@ def fetch_breadth(market: str, start: str, end: str, base: float = 50000.0) -> p
 
 @st.cache_data(show_spinner=False, ttl=3600)
 def fetch_index(market: str, start: str, end: str) -> pd.DataFrame:
-    """yfinance 지수 OHLC"""
-    if not YF_OK:
-        raise RuntimeError("yfinance 미설치")
-    cfg = MARKET_CFG[market]
-    s = pd.to_datetime(start, format="%Y%m%d").strftime("%Y-%m-%d")
-    e = (pd.to_datetime(end, format="%Y%m%d") + timedelta(days=1)).strftime("%Y-%m-%d")
-    raw = yf.download(cfg["index"], start=s, end=e, auto_adjust=True, progress=False)
-    if raw.empty:
-        raise RuntimeError(f"{cfg['index']} 데이터 없음")
-    if isinstance(raw.columns, pd.MultiIndex):
-        raw.columns = ["_".join(c).strip() for c in raw.columns]
-    raw.columns = [c.lower().split("_")[0] for c in raw.columns]
-    raw.index = pd.to_datetime(raw.index)
-    out = pd.DataFrame({
-        "date":  raw.index.strftime("%Y%m%d"),
-        "open":  pd.to_numeric(raw.get("open",  raw.iloc[:, 0]), errors="coerce"),
-        "high":  pd.to_numeric(raw.get("high",  raw.iloc[:, 0]), errors="coerce"),
-        "low":   pd.to_numeric(raw.get("low",   raw.iloc[:, 0]), errors="coerce"),
-        "close": pd.to_numeric(raw.get("close", raw.iloc[:, 0]), errors="coerce"),
-    })
-    return out.dropna(subset=["close"]).reset_index(drop=True)
+    """Stooq로 지수 OHLC. NYSE→^DJI, NASDAQ→^NDQ"""
+    import requests as _req
+    from io import StringIO
+    sym = "^dji" if market == "NYSE" else "^ndq"
+    s = pd.to_datetime(start, format="%Y%m%d").strftime("%Y%m%d")
+    e = pd.to_datetime(end,   format="%Y%m%d").strftime("%Y%m%d")
+    url = f"https://stooq.com/q/d/l/?s={sym}&d1={s}&d2={e}&i=d"
+    r = _req.get(url, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
+    if r.status_code != 200 or "No data" in r.text or len(r.text) < 50:
+        raise RuntimeError(f"Stooq {sym} 데이터 없음")
+    df = pd.read_csv(StringIO(r.text))
+    df.columns = [c.strip().lower() for c in df.columns]
+    df["date"] = pd.to_datetime(df["date"]).dt.strftime("%Y%m%d")
+    for c in ["open","high","low","close"]:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+    return df[["date","open","high","low","close"]].dropna(subset=["close"]).reset_index(drop=True)
 
 @st.cache_data(show_spinner=False, ttl=3600)
 def fetch_nhnl(market: str, start: str, end: str) -> pd.DataFrame | None:
     """
-    yfinance ^HGH/^LOW (NYSE) 또는 ^HGHQ/^LOWQ (NASDAQ) →
-    일별 신고가/신저가 종목 수 → 주봉(금요일) 합산
+    Stooq로 NYSE/NASDAQ 52주 신고가/신저가 수집.
+    NYSE:   $HIGN / $LOWN
+    NASDAQ: $HIGNQ / $LOWNQ
+    일별 → 주봉(금요일) 합산
     """
-    if not YF_OK:
-        return None
-    cfg = MARKET_CFG[market]
+    if market == "NYSE":
+        nhi_sym, nlo_sym = "$hign", "$lown"
+    else:
+        nhi_sym, nlo_sym = "$hignq", "$lownq"
     try:
-        nhi_s = _yf_close(cfg["nhi"], start, end)
-        nlo_s = _yf_close(cfg["nlo"], start, end)
+        nhi_s = _stooq_get(nhi_sym, start, end)
+        nlo_s = _stooq_get(nlo_sym, start, end)
         df = pd.DataFrame({"new_highs": nhi_s, "new_lows": nlo_s}).dropna()
         df.index = pd.to_datetime(df.index)
         weekly = df.resample("W-FRI").sum()
