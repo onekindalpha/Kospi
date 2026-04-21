@@ -389,95 +389,206 @@ def compute_signals(df, lookback, price_thr, ad_thr, gap_warn, gap_danger):
                 price_high=price_high, ad_at_peak=ad_at_peak)
 
 # ──────────────────────────────────────────────────────────────
-# 차트 — matplotlib (검증된 방식)
+# H_a / H_b / L_a / L_b 계산 (파인스크립트 로직 그대로)
 # ──────────────────────────────────────────────────────────────
-def make_chart_img(df: pd.DataFrame, market: str, sig: dict,
-                   chart_months: int) -> bytes:
-    end_dt    = pd.to_datetime(df["date"].astype(str), format="%Y%m%d").max()
-    start_dt  = end_dt - pd.DateOffset(months=chart_months)
-    mask      = pd.to_datetime(df["date"].astype(str), format="%Y%m%d") >= start_dt
-    pf        = df[mask].copy().reset_index(drop=True)
-    pf["dt"]  = pd.to_datetime(pf["date"].astype(str), format="%Y%m%d")
+def compute_hlab(df: pd.DataFrame, high_bars: int = 60, low_bars: int = 130) -> dict:
+    """
+    파인스크립트 v16과 동일한 로직:
+    H_b = 최근 high_bars 구간 고점
+    H_a = 그 이전 high_bars 구간 고점
+    L_b = 최근 low_bars 구간 저점
+    L_a = 그 이전 low_bars 구간 저점
+    """
+    closes  = df["close"].values.astype(float)
+    ad_line = df["ad_line"].values.astype(float)
+    dts     = pd.to_datetime(df["date"].astype(str), format="%Y%m%d")
+    n = len(closes)
 
-    # mplfinance용 OHLC (date_num, open, high, low, close)
-    ohlc = pf[["dt", "open", "high", "low", "close"]].copy()
-    ohlc["dn"] = ohlc["dt"].map(mdates.date2num)
-    ohlc_vals  = ohlc[["dn", "open", "high", "low", "close"]].values
+    def _safe_slice(arr, end_idx, length):
+        start = max(0, end_idx - length)
+        return arr[start:end_idx], start
 
-    # 고점 기준일
-    days_ago = int(sig["peak_label"].split("일전")[0]) if "일전" in sig["peak_label"] else 0
-    peak_dt  = pd.to_datetime(
-        str(df["date"].iloc[-(days_ago + 1)]), format="%Y%m%d"
-    )
-    peak_dn  = mdates.date2num(peak_dt)
+    # H_b: 최근 high_bars 구간
+    hb_window, hb_start = _safe_slice(closes, n, high_bars)
+    hb_idx_local = int(np.argmax(hb_window))
+    hb_idx  = hb_start + hb_idx_local
+    hb_val  = closes[hb_idx]
+    hb_dt   = dts.iloc[hb_idx]
+    hb_ad   = ad_line[hb_idx]
 
-    fig, (ax1, ax2) = plt.subplots(
-        2, 1, figsize=(14, 9), sharex=True,
-        gridspec_kw={"height_ratios": [1.4, 1]},   # 비율 균형 (비교하기 쉽도록)
-        facecolor="#0e1117",
-    )
-    for ax in (ax1, ax2):
-        ax.set_facecolor("#0e1117")
-        ax.tick_params(colors="#aaaaaa")
-        ax.spines[:].set_color("#333333")
-        ax.yaxis.label.set_color("#aaaaaa")
-
-    if MPL_OK:
-        candlestick_ohlc(ax1, ohlc_vals, width=0.6,
-                         colorup="#26a69a", colordown="#ef5350", alpha=0.9)
+    # H_a: 이전 high_bars 구간 (H_b 구간 앞)
+    ha_window, ha_start = _safe_slice(closes, hb_start + hb_idx_local, high_bars)
+    if len(ha_window) > 0:
+        ha_idx_local = int(np.argmax(ha_window))
+        ha_idx  = ha_start + ha_idx_local
+        ha_val  = closes[ha_idx]
+        ha_dt   = dts.iloc[ha_idx]
+        ha_ad   = ad_line[ha_idx]
     else:
-        ax1.plot(pf["dt"], pf["close"].astype(float), color="#26a69a", linewidth=1.5)
+        ha_val, ha_dt, ha_ad, ha_idx = hb_val, hb_dt, hb_ad, hb_idx
 
-    ax1.set_title(f"{market} Index", color="#e0e0e0", fontsize=13)
-    ax1.set_ylabel("Index", color="#aaaaaa")
-    ax1.grid(True, color="#1e2530", linewidth=0.5)
-    # 수직선: 고점 날짜
-    ax1.axvline(peak_dn, color="orange", linestyle=":", linewidth=1.2, alpha=0.6)
-    # 수평선: 고점 가격 — 캔들과 닿는 수준 확인용
-    ax1.axhline(y=sig["price_high"], color="orange", linestyle="--",
-                linewidth=1.2, alpha=0.8,
-                label=f"Peak {sig['price_high']:,.2f}")
-    ax1.legend(loc="upper left", fontsize=9,
-               facecolor="#1a1a2e", labelcolor="#e0e0e0", framealpha=0.8)
+    # L_b: 최근 low_bars 구간
+    lb_window, lb_start = _safe_slice(closes, n, low_bars)
+    lb_idx_local = int(np.argmin(lb_window))
+    lb_idx  = lb_start + lb_idx_local
+    lb_val  = closes[lb_idx]
+    lb_dt   = dts.iloc[lb_idx]
+    lb_ad   = ad_line[lb_idx]
 
-    ax2.plot(pf["dt"], pf["ad_line"].astype(float),
-             color="#1565c0", linewidth=1.8)
-    ax2.set_ylabel("A/D Line", color="#aaaaaa")
-    ax2.set_title("A/D Line", color="#e0e0e0", fontsize=11)
-    ax2.grid(True, color="#1e2530", linewidth=0.5)
-    # 수직선: 고점 날짜
-    ax2.axvline(peak_dn, color="orange", linestyle=":", linewidth=1.2, alpha=0.6)
-    # 수평선: 고점일 당시 A/D 값 — A/D선과 닿는 수준 확인용
-    ax2.axhline(y=sig["ad_at_peak"], color="orange", linestyle="--",
-                linewidth=1.2, alpha=0.8,
-                label=f"A/D at Peak {sig['ad_at_peak']:,.0f}")
-    ax2.legend(loc="upper left", fontsize=9,
-               facecolor="#1a1a2e", labelcolor="#e0e0e0", framealpha=0.8)
+    # L_a: 이전 low_bars 구간
+    la_window, la_start = _safe_slice(closes, lb_start + lb_idx_local, low_bars)
+    if len(la_window) > 0:
+        la_idx_local = int(np.argmin(la_window))
+        la_idx  = la_start + la_idx_local
+        la_val  = closes[la_idx]
+        la_dt   = dts.iloc[la_idx]
+        la_ad   = ad_line[la_idx]
+    else:
+        la_val, la_dt, la_ad, la_idx = lb_val, lb_dt, lb_ad, lb_idx
 
-    # x축 포맷
-    locator   = mdates.AutoDateLocator()
-    formatter = mdates.DateFormatter("%Y-%m")
-    ax2.xaxis.set_major_locator(locator)
-    ax2.xaxis.set_major_formatter(formatter)
-    fig.autofmt_xdate(rotation=30, ha="right")
+    # 불일치 판정
+    bear_div     = bool(hb_val > ha_val and hb_ad < ha_ad)
+    bear_div_pct = abs((ha_ad - hb_ad) / ha_ad * 100) if (bear_div and ha_ad != 0) else 0.0
+    bull_div     = bool(lb_val < la_val and lb_ad > la_ad)
+    bull_div_pct = abs((lb_ad - la_ad) / la_ad * 100) if (bull_div and la_ad != 0) else 0.0
 
-    # 판정 박스 — 영어로만 표시 (한글 폰트 없는 환경 대비)
-    box_txt = (f"Peak: {sig['peak_label']}\n"
-               f"Price vs Peak: {sig['price_off']:.2f}%\n"
-               f"A/D vs Peak:   {sig['ad_off']:.2f}%\n"
-               f"Gap:           {sig['gap']:.2f}%")
-    ax1.text(0.01, 0.97, box_txt, transform=ax1.transAxes,
-             va="top", ha="left", fontsize=10,
-             color="white", family="monospace",
-             bbox=dict(boxstyle="round,pad=0.5", facecolor=sig["color"], alpha=0.9))
+    return dict(
+        hb_val=hb_val, hb_dt=hb_dt, hb_ad=hb_ad,
+        ha_val=ha_val, ha_dt=ha_dt, ha_ad=ha_ad,
+        lb_val=lb_val, lb_dt=lb_dt, lb_ad=lb_ad,
+        la_val=la_val, la_dt=la_dt, la_ad=la_ad,
+        bear_div=bear_div, bear_div_pct=bear_div_pct,
+        bull_div=bull_div, bull_div_pct=bull_div_pct,
+    )
 
-    plt.tight_layout(pad=1.5)
-    buf = io.BytesIO()
-    plt.savefig(buf, format="png", dpi=150, bbox_inches="tight",
-                facecolor=fig.get_facecolor())
-    plt.close(fig)
-    buf.seek(0)
-    return buf.read()
+# ──────────────────────────────────────────────────────────────
+# 차트 — Plotly (호버 세로선 + H_a/H_b/L_a/L_b)
+# ──────────────────────────────────────────────────────────────
+def make_plotly_chart(df: pd.DataFrame, market: str, sig: dict,
+                      chart_months: int, hlab: dict) -> go.Figure:
+    from plotly.subplots import make_subplots
+
+    end_dt   = pd.to_datetime(df["date"].astype(str), format="%Y%m%d").max()
+    start_dt = end_dt - pd.DateOffset(months=chart_months)
+    mask     = pd.to_datetime(df["date"].astype(str), format="%Y%m%d") >= start_dt
+    pf       = df[mask].copy().reset_index(drop=True)
+    pf["dt"] = pd.to_datetime(pf["date"].astype(str), format="%Y%m%d")
+
+    # 색상
+    hb_color = "rgba(255,80,80,0.95)"  if hlab["bear_div"] else "rgba(160,160,160,0.8)"
+    ha_color = "rgba(255,140,140,0.6)" if hlab["bear_div"] else "rgba(120,120,120,0.5)"
+    lb_color = "rgba(38,210,160,0.95)" if hlab["bull_div"] else "rgba(160,160,160,0.8)"
+    la_color = "rgba(38,210,160,0.6)"  if hlab["bull_div"] else "rgba(120,120,120,0.5)"
+
+    fig = make_subplots(
+        rows=2, cols=1, shared_xaxes=True,
+        row_heights=[0.52, 0.48], vertical_spacing=0.03,
+        subplot_titles=(f"{market} 지수", "A/D Line (가격 겹쳐 표시)")
+    )
+
+    # ── 1. 캔들스틱 (위 패널)
+    fig.add_trace(go.Candlestick(
+        x=pf["dt"],
+        open=pf["open"], high=pf["high"], low=pf["low"], close=pf["close"],
+        increasing_line_color="#26a69a", decreasing_line_color="#ef5350",
+        name=market, showlegend=False,
+    ), row=1, col=1)
+
+    # ── 2. 가격 수평선 (H_b, H_a, L_b, L_a)
+    for val, color, dash, label in [
+        (hlab["hb_val"], hb_color, "dash",  f"H_b {hlab['hb_val']:,.2f}"),
+        (hlab["ha_val"], ha_color, "dot",   f"H_a {hlab['ha_val']:,.2f}"),
+        (hlab["lb_val"], lb_color, "dash",  f"L_b {hlab['lb_val']:,.2f}"),
+        (hlab["la_val"], la_color, "dot",   f"L_a {hlab['la_val']:,.2f}"),
+    ]:
+        fig.add_hline(y=val, line_color=color, line_dash=dash, line_width=1.5,
+                      annotation_text=label, annotation_font_color=color,
+                      annotation_font_size=11, row=1, col=1)
+
+    # ── 3. A/D Line (아래 패널)
+    fig.add_trace(go.Scatter(
+        x=pf["dt"], y=pf["ad_line"].astype(float),
+        line=dict(color="#1e88e5", width=2.5),
+        name="A/D Line",
+    ), row=2, col=1)
+
+    # ── 4. 가격 곡선 겹쳐 표시 (A/D 스케일로 정규화) — 트레이딩뷰 방식
+    ad_min = pf["ad_line"].min(); ad_max = pf["ad_line"].max()
+    pr_min = pf["close"].min();   pr_max = pf["close"].max()
+    if pr_max != pr_min:
+        price_mapped = ad_min + (pf["close"] - pr_min) / (pr_max - pr_min) * (ad_max - ad_min)
+    else:
+        price_mapped = pf["ad_line"]
+    fig.add_trace(go.Scatter(
+        x=pf["dt"], y=price_mapped,
+        line=dict(color="rgba(180,180,180,0.5)", width=1.2),
+        name="가격(겹침)", showlegend=True,
+    ), row=2, col=1)
+
+    # ── 5. A/D 수평선 (H_b/H_a/L_b/L_a 기준)
+    for val, color, dash, label in [
+        (hlab["hb_ad"], hb_color, "dash",  f"A/D@H_b {hlab['hb_ad']:,.0f}"),
+        (hlab["ha_ad"], ha_color, "dot",   f"A/D@H_a {hlab['ha_ad']:,.0f}"),
+        (hlab["lb_ad"], lb_color, "dash",  f"A/D@L_b {hlab['lb_ad']:,.0f}"),
+        (hlab["la_ad"], la_color, "dot",   f"A/D@L_a {hlab['la_ad']:,.0f}"),
+    ]:
+        fig.add_hline(y=val, line_color=color, line_dash=dash, line_width=1.5,
+                      annotation_text=label, annotation_font_color=color,
+                      annotation_font_size=10, row=2, col=1)
+
+    # ── 6. 불일치 연결선 H_a→H_b, L_a→L_b (A/D 패널)
+    if hlab["bear_div"]:
+        fig.add_shape(type="line",
+            x0=hlab["ha_dt"], y0=hlab["ha_ad"],
+            x1=hlab["hb_dt"], y1=hlab["hb_ad"],
+            line=dict(color="rgba(255,80,80,0.85)", width=2, dash="dash"),
+            row=2, col=1)
+        # 라벨
+        mid_dt = hlab["ha_dt"] + (hlab["hb_dt"] - hlab["ha_dt"]) / 2
+        mid_ad = (hlab["ha_ad"] + hlab["hb_ad"]) / 2
+        fig.add_annotation(x=mid_dt, y=mid_ad, text=f"⚠ {hlab['bear_div_pct']:.1f}%",
+                           font=dict(color="rgba(255,80,80,0.9)", size=11),
+                           showarrow=False, row=2, col=1)
+    if hlab["bull_div"]:
+        fig.add_shape(type="line",
+            x0=hlab["la_dt"], y0=hlab["la_ad"],
+            x1=hlab["lb_dt"], y1=hlab["lb_ad"],
+            line=dict(color="rgba(38,210,160,0.85)", width=2, dash="dash"),
+            row=2, col=1)
+        mid_dt = hlab["la_dt"] + (hlab["lb_dt"] - hlab["la_dt"]) / 2
+        mid_ad = (hlab["la_ad"] + hlab["lb_ad"]) / 2
+        fig.add_annotation(x=mid_dt, y=mid_ad, text=f"✓ {hlab['bull_div_pct']:.1f}%",
+                           font=dict(color="rgba(38,210,160,0.9)", size=11),
+                           showarrow=False, row=2, col=1)
+
+    # ── 판정 제목
+    div_text = ""
+    if hlab["bear_div"]:
+        div_text = f"  ⚠ 부정적 불일치 {hlab['bear_div_pct']:.1f}%"
+    elif hlab["bull_div"]:
+        div_text = f"  ✓ 긍정적 불일치 {hlab['bull_div_pct']:.1f}%"
+
+    fig.update_layout(
+        template="plotly_dark",
+        height=680,
+        title=dict(text=f"{market} 브레드스 — {sig['verdict']}{div_text}", font_size=13),
+        xaxis_rangeslider_visible=False,
+        hovermode="x unified",
+        legend=dict(orientation="h", y=1.01, x=0),
+        margin=dict(l=10, r=80, t=55, b=10),
+    )
+    # 호버 세로선 (양쪽 패널)
+    fig.update_xaxes(
+        showspikes=True, spikemode="across", spikesnap="cursor",
+        spikethickness=1, spikecolor="#aaa", spikedash="dot",
+        # 모든 날짜 눈금 (주 단위)
+        tickformat="%m/%d",
+        dtick=7 * 24 * 60 * 60 * 1000,  # 7일(ms)
+        tickangle=-45, tickfont=dict(size=9),
+    )
+    fig.update_yaxes(showspikes=True, spikethickness=1, spikecolor="#aaa")
+
+    return fig
 
 # ──────────────────────────────────────────────────────────────
 # 메인 앱
@@ -518,6 +629,8 @@ def main():
         st.subheader("분석 파라미터")
         lookback     = st.slider("Lookback (일)",      20, 252, 126)
         chart_months = st.slider("차트 표시 기간 (월)", 1,  24,  6)
+        high_bars    = st.slider("고점 탐색 구간 H_b (일)", 10, 500, 60)
+        low_bars     = st.slider("저점 탐색 구간 L_b (일)", 10, 500, 130)
         with st.expander("임계값 세부 설정"):
             price_thr  = st.number_input("가격 고점 근접 기준 %", value=2.0,  step=0.1)
             ad_thr     = st.number_input("A/D 고점 근접 기준 %",  value=3.0,  step=0.1)
@@ -595,10 +708,11 @@ def main():
         return
 
     sig  = compute_signals(df, lookback, price_thr, ad_thr, gap_warn, gap_danger)
+    hlab = compute_hlab(df, high_bars=high_bars, low_bars=low_bars)
     last = df.iloc[-1]
 
     # ── 탭 구성 ──
-    tab1, tab2, tab3, tab4 = st.tabs(["📈 A/D Line", "⚡ 모멘텀", "🏔 고점-저점(NH-NL)", "📊 P/D 비율"])
+    tab1, tab2, tab3 = st.tabs(["📈 A/D Line", "⚡ 모멘텀", "🏔 NH-NL"])
 
     # ══════════════════════════════════════════════
     # TAB 1: 기존 A/D Line 분석
@@ -633,8 +747,8 @@ def main():
             unsafe_allow_html=True,
         )
         try:
-            img = make_chart_img(df, market, sig, chart_months)
-            st.image(img, use_container_width=True)
+            fig_main = make_plotly_chart(df, market, sig, chart_months, hlab)
+            st.plotly_chart(fig_main, use_container_width=True)
         except Exception as e:
             st.error(f"차트 렌더링 실패: {e}")
 
@@ -718,7 +832,7 @@ def main():
                        f"수집 기간을 늘리거나 MA 기간을 줄여주세요.")
 
     # ══════════════════════════════════════════════
-    # TAB 3: 고점-저점 수치 (NH-NL)
+    # TAB 3: NH-NL
     # ══════════════════════════════════════════════
     with tab3:
         st.subheader("🏔 고점-저점 수치 (신고가 - 신저가 종목 수)")
@@ -780,319 +894,61 @@ def main():
                 h3.metric("NH-NL",          f"{last_nhnl:+,}")
                 h4.metric("판정",            nhnl_verdict)
 
+                # NH-NL 기울기(추세) 계산 — 4주 MA의 선형 기울기
+                nhnl_ma_vals = nhnl_ma.dropna()
+                if len(nhnl_ma_vals) >= 2:
+                    x_idx  = np.arange(len(nhnl_ma_vals))
+                    slope  = np.polyfit(x_idx, nhnl_ma_vals.values, 1)[0]
+                    trend_label = (
+                        f"▲ 상승 추세 ({slope:+.1f}/주)" if slope > 0.5 else
+                        f"▼ 하락 추세 ({slope:+.1f}/주)" if slope < -0.5 else
+                        f"→ 횡보 ({slope:+.1f}/주)"
+                    )
+                    trend_color = "#26a69a" if slope > 0.5 else "#ef5350" if slope < -0.5 else "#aaa"
+                else:
+                    trend_label, trend_color, slope = "데이터 부족", "#aaa", 0.0
+
+                h1, h2, h3, h4, h5 = st.columns(5)
+                h1.metric("신고가 종목 수", f"{last_nh:,}")
+                h2.metric("신저가 종목 수", f"{last_nl:,}")
+                h3.metric("NH-NL",          f"{last_nhnl:+,}")
+                h4.metric("4주 MA 기울기",  f"{slope:+.1f}")
+                h5.metric("추세",            trend_label)
+
                 fig_hl = go.Figure()
                 fig_hl.add_trace(go.Bar(
                     x=pf3["dt"], y=nhnl_plot,
                     marker_color=[("#26a69a" if v >= 0 else "#ef5350") for v in nhnl_plot],
-                    name="주봉 NH-NL", opacity=0.85
+                    name="주봉 NH-NL", opacity=0.75
                 ))
                 fig_hl.add_trace(go.Scatter(
                     x=pf3["dt"], y=nhnl_ma,
-                    line=dict(color="orange", width=1.5),
+                    line=dict(color="orange", width=2),
                     name="4주 MA"
                 ))
+                # 기울기 추세선 (MA 위에)
+                if len(nhnl_ma_vals) >= 2:
+                    trend_y = np.polyval(np.polyfit(x_idx, nhnl_ma_vals.values, 1), x_idx)
+                    fig_hl.add_trace(go.Scatter(
+                        x=pf3["dt"].iloc[-len(nhnl_ma_vals):], y=trend_y,
+                        line=dict(color=trend_color, width=1.5, dash="dash"),
+                        name="기울기(추세)"
+                    ))
                 fig_hl.add_hline(y=0, line_color="gray", line_dash="dot")
                 fig_hl.update_layout(
-                    title=f"{market} 고점-저점 수치 — 52주 신고가/신저가 종목 수 (주봉)",
-                    template="plotly_dark", height=420,
-                    yaxis_title="NH-NL 종목 수"
+                    title=f"{market} NH-NL — 52주 신고가/신저가 (주봉)  {trend_label}",
+                    template="plotly_dark", height=440,
+                    hovermode="x unified",
+                    xaxis=dict(
+                        tickformat="%m/%d", dtick=7*24*60*60*1000,
+                        tickangle=-45, tickfont=dict(size=9),
+                        showspikes=True, spikemode="across",
+                        spikethickness=1, spikecolor="#aaa", spikedash="dot",
+                    ),
+                    yaxis_title="NH-NL 종목 수",
+                    legend=dict(orientation="h", y=1.02),
                 )
                 st.plotly_chart(fig_hl, use_container_width=True)
-
-    # ══════════════════════════════════════════════
-    # TAB 4: P/D 비율 (스탠 와인스태인 책 정의)
-    # ══════════════════════════════════════════════
-    with tab4:
-        st.subheader("📊 P/D 비율 (Price ÷ Dividend)")
-        st.caption(
-            "스탠 와인스태인 책 정의: 지수 종가 ÷ 배당금 추정치 (종가 × 배당수익률). "
-            "26 이상 = 위험 구간 / 14~17 = 정상 / 낮을수록 저평가"
-        )
-
-        col_left, col_right = st.columns(2)
-        with col_left:
-            pd_market = st.selectbox("미국 지수", ["다우존스 (^DJI)", "S&P500 (^GSPC)", "나스닥 (^IXIC)"],
-                                     key="pd_mkt")
-        with col_right:
-            pd_kr_market = st.selectbox("국내 지수", ["KOSPI", "KOSDAQ"], key="pd_kr_mkt")
-        pd_symbol_map = {
-            "다우존스 (^DJI)":  "DJI",
-            "S&P500 (^GSPC)":  "S&P500",
-            "나스닥 (^IXIC)":   "IXIC",
-        }
-        pd_symbol = pd_symbol_map[pd_market]
-        pd_ma_n = st.slider("MA 기간 (주)", 4, 52, 13, key="pd_ma")
-
-        pd_danger_high = st.number_input("위험 기준 (이상)", value=26.0, step=1.0, key="pd_dh")
-        pd_normal_low  = st.number_input("정상 하단 기준", value=14.0, step=1.0, key="pd_nl")
-
-        @st.cache_data(show_spinner=False, ttl=86400)
-        def fetch_pd_data(symbol: str, months: int):
-            """
-            스탠 와인스태인 P/D 비율 계산.
-            책 정의: 지수 종가 ÷ 연간 배당금.
-            연간 배당금 = 과거 12개월 실제 배당금 합산 (rolling 12m sum).
-            yfinance ticker.dividends로 실제 배당금 시계열 수집.
-            → P/D가 시간에 따라 움직이는 차트 생성.
-            """
-            try:
-                import yfinance as yf
-            except ImportError:
-                return None, "yfinance 미설치"
-            try:
-                end_d   = datetime.today()
-                start_d = end_d - timedelta(days=max(365 * 6, months * 35))
-                yf_sym  = {"DJI": "^DJI", "S&P500": "^GSPC", "IXIC": "^IXIC"}.get(symbol, "^DJI")
-                ticker  = yf.Ticker(yf_sym)
-
-                # 종가 (일봉)
-                price_raw = ticker.history(start=start_d.strftime("%Y-%m-%d"),
-                                           end=end_d.strftime("%Y-%m-%d"), auto_adjust=True)
-                if price_raw.empty:
-                    return None, f"{yf_sym} 가격 데이터 없음"
-                price_raw.index = pd.to_datetime(price_raw.index).tz_localize(None)
-                close_s = price_raw["Close"].sort_index()
-
-                # 실제 배당금 시계열
-                divs = ticker.dividends
-                if divs is not None and not divs.empty:
-                    divs.index = pd.to_datetime(divs.index).tz_localize(None)
-                    divs = divs.sort_index()
-                    # 일별 인덱스로 reindex 후 rolling 365일 합산 = 연간 배당금
-                    divs_daily = divs.reindex(close_s.index, fill_value=0.0)
-                    annual_div = divs_daily.rolling(365, min_periods=1).sum()
-                else:
-                    annual_div = None
-
-                # 주봉 리샘플
-                weekly_close = close_s.resample("W-FRI").last().dropna()
-
-                if annual_div is not None and not annual_div.empty:
-                    weekly_div = annual_div.resample("W-FRI").last().reindex(weekly_close.index).ffill()
-                else:
-                    # 배당금 없으면 역사적 평균 수익률로 추정
-                    fallback = {"DJI": 0.020, "S&P500": 0.018, "IXIC": 0.007}
-                    dy = fallback.get(symbol, 0.018)
-                    weekly_div = weekly_close * dy
-
-                weekly_div = weekly_div.replace(0, float("nan"))
-                pd_ratio   = weekly_close / weekly_div
-
-                out = pd.DataFrame({
-                    "date":          weekly_close.index.strftime("%Y%m%d"),
-                    "close":         weekly_close.values,
-                    "dividend_est":  weekly_div.values,
-                    "pd_ratio":      pd_ratio.values,
-                }).dropna(subset=["pd_ratio"])
-                out["div_yield"] = out["dividend_est"] / out["close"]
-                return out.reset_index(drop=True), None
-            except Exception as e:
-                return None, str(e)
-
-        with st.spinner("P/D 데이터 로딩 중…"):
-            pd_df, pd_err = fetch_pd_data(pd_symbol, chart_months)
-
-        if pd_err:
-            st.error(f"P/D 데이터 오류: {pd_err}")
-        elif pd_df is None or pd_df.empty:
-            st.warning("P/D 데이터를 가져오지 못했습니다.")
-        else:
-            end_pd   = pd.to_datetime(pd_df["date"].max(), format="%Y%m%d")
-            start_pd = end_pd - pd.DateOffset(months=chart_months)
-            pd_df["dt"] = pd.to_datetime(pd_df["date"], format="%Y%m%d")
-            pf4 = pd_df[pd_df["dt"] >= start_pd].copy().reset_index(drop=True)
-
-            pd_ratio_s  = pd_df["pd_ratio"]
-            pd_ma_s     = pd_ratio_s.rolling(pd_ma_n).mean()
-            pd_plot     = pf4["pd_ratio"]
-            mask_pd     = pd_df["dt"] >= start_pd
-            pd_ma_plot  = pd_ratio_s.rolling(pd_ma_n).mean().iloc[mask_pd.values].reset_index(drop=True)
-
-            last_pd    = pd_ratio_s.iloc[-1]
-            last_pd_ma = pd_ma_s.iloc[-1]
-            last_close = pd_df["close"].iloc[-1]
-            last_div   = pd_df["dividend_est"].iloc[-1]
-
-            pd_verdict = ("🔴 위험 — 과대평가 구간"  if last_pd >= pd_danger_high else
-                          "🟡 주의 — 고평가 근접"     if last_pd >= pd_danger_high * 0.85 else
-                          "🟢 정상 구간"              if last_pd >= pd_normal_low else
-                          "🟢 저평가 — 매수 유리")
-            pd_color   = ("#c62828" if last_pd >= pd_danger_high else
-                          "#ef6c00" if last_pd >= pd_danger_high * 0.85 else
-                          "#2e7d32")
-
-            last_div_yield = pd_df["div_yield"].iloc[-1]
-
-            p1, p2, p3, p4_col = st.columns(4)
-            p1.metric("지수 종가",    f"{last_close:,.2f}")
-            p2.metric("연배당수익률", f"{last_div_yield*100:.2f}%")
-            p3.metric("P/D 비율",     f"{last_pd:.1f}" if not pd.isna(last_pd) else "N/A")
-            p4_col.metric("판정",     pd_verdict)
-
-            st.info(
-                "📌 **스탠 와인스태인 P/D 계산법**: 배당금(D) = 지수 종가 × 연간 배당수익률. "
-                "P/D = 지수 종가 ÷ 배당금. "
-                "**26 이상 = 위험**, **14~17 = 정상 구간** (책 기준)."
-            )
-
-            fig_pd = go.Figure()
-            fig_pd.add_hrect(
-                y0=pd_danger_high, y1=max(pd_plot.max(skipna=True) + 2, pd_danger_high + 2),
-                fillcolor="red", opacity=0.06, line_width=0,
-                annotation_text="위험 구간", annotation_position="top left"
-            )
-            fig_pd.add_hrect(
-                y0=0, y1=pd_normal_low,
-                fillcolor="teal", opacity=0.06, line_width=0,
-                annotation_text="저평가 구간", annotation_position="bottom left"
-            )
-            fig_pd.add_trace(go.Scatter(
-                x=pf4["dt"], y=pd_plot,
-                line=dict(color="#42a5f5", width=2),
-                name="P/D 비율"
-            ))
-            fig_pd.add_trace(go.Scatter(
-                x=pf4["dt"], y=pd_ma_plot,
-                line=dict(color="orange", width=1.5, dash="dash"),
-                name=f"P/D {pd_ma_n}주 MA"
-            ))
-            fig_pd.add_hline(y=pd_danger_high, line_color="red",  line_dash="dash",
-                             annotation_text=f"위험({pd_danger_high:.0f})")
-            fig_pd.add_hline(y=pd_normal_low,  line_color="teal", line_dash="dash",
-                             annotation_text=f"정상하단({pd_normal_low:.0f})")
-            fig_pd.update_layout(
-                title=f"{pd_market} P/D 비율 (Price ÷ Dividend 추정, 주봉)",
-                template="plotly_dark", height=420,
-                legend=dict(orientation="h", y=1.05),
-                yaxis_title="P/D 비율"
-            )
-            st.plotly_chart(fig_pd, use_container_width=True)
-
-        # ── 국장 P/D ──────────────────────────────────
-        st.divider()
-        st.subheader(f"📊 {pd_kr_market} P/D 비율")
-
-        @st.cache_data(show_spinner=False, ttl=86400)
-        def fetch_pd_data_kr(kr_symbol: str, months: int):
-            """KOSPI/KOSDAQ P/D 계산.
-            KOSPI/KOSDAQ 지수는 실제 배당금 시계열 없음 →
-            FDR KS11/KQ11 종가 × 역사적 배당수익률(시계열 추정)로 계산.
-            배당수익률은 연도별로 다르므로 연도별 평균값 적용해 움직이는 P/D 생성."""
-            if not FDR_OK:
-                return None, "finance-datareader 미설치"
-            try:
-                end_d   = datetime.today()
-                start_d = end_d - timedelta(days=max(365 * 6, months * 35))
-                sym_fdr = {"KOSPI": "KS11", "KOSDAQ": "KQ11"}.get(kr_symbol, "KS11")
-                raw = fdr.DataReader(sym_fdr,
-                                     start_d.strftime("%Y-%m-%d"),
-                                     end_d.strftime("%Y-%m-%d"))
-                if raw.empty:
-                    return None, f"{sym_fdr} 데이터 없음"
-                raw.index = pd.to_datetime(raw.index)
-                raw.columns = [str(c).strip().title() for c in raw.columns]
-                close_col = next((c for c in raw.columns if c.lower() in ("close", "adj close")), None)
-                if not close_col:
-                    return None, f"종가 컬럼 없음: {list(raw.columns)}"
-                weekly = raw[[close_col]].resample("W-FRI").last().dropna()
-                weekly.columns = ["close"]
-
-                # KOSPI 연도별 배당수익률 (한국거래소 공시 기준 역사적 평균)
-                # 출처: KRX 통계, Bloomberg 집계
-                kospi_dy_by_year = {
-                    2018: 0.0117, 2019: 0.0214, 2020: 0.0174,
-                    2021: 0.0196, 2022: 0.0281, 2023: 0.0240,
-                    2024: 0.0230, 2025: 0.0230, 2026: 0.0230,
-                }
-                kosdaq_dy_by_year = {
-                    2018: 0.0040, 2019: 0.0055, 2020: 0.0042,
-                    2021: 0.0048, 2022: 0.0071, 2023: 0.0060,
-                    2024: 0.0060, 2025: 0.0060, 2026: 0.0060,
-                }
-                dy_map = kospi_dy_by_year if kr_symbol == "KOSPI" else kosdaq_dy_by_year
-                default_dy = 0.025 if kr_symbol == "KOSPI" else 0.008
-
-                # 주봉 날짜 → 연도별 배당수익률 적용
-                weekly["div_yield"] = weekly.index.year.map(
-                    lambda y: dy_map.get(y, default_dy)
-                )
-                weekly["dividend_est"] = weekly["close"] * weekly["div_yield"]
-                weekly["pd_ratio"]     = weekly["close"] / weekly["dividend_est"].replace(0, float("nan"))
-                weekly = weekly.reset_index()
-                weekly.columns = ["date", "close", "div_yield", "dividend_est", "pd_ratio"]
-                return weekly, None
-            except Exception as e:
-                return None, str(e)
-
-        with st.spinner(f"{pd_kr_market} P/D 로딩 중…"):
-            pd_kr_df, pd_kr_err = fetch_pd_data_kr(pd_kr_market, chart_months)
-
-        if pd_kr_err:
-            st.error(f"국장 P/D 오류: {pd_kr_err}")
-        elif pd_kr_df is None or pd_kr_df.empty:
-            st.warning("국장 P/D 데이터를 가져오지 못했습니다.")
-        else:
-            end_kr   = pd.to_datetime(pd_kr_df["date"].max(), format="%Y%m%d")
-            start_kr = end_kr - pd.DateOffset(months=chart_months)
-            pd_kr_df["dt"] = pd.to_datetime(pd_kr_df["date"], format="%Y%m%d")
-            pf4_kr   = pd_kr_df[pd_kr_df["dt"] >= start_kr].copy().reset_index(drop=True)
-            kr_ratio_s   = pd_kr_df["pd_ratio"]
-            kr_ma_s      = kr_ratio_s.rolling(pd_ma_n).mean()
-            kr_plot      = pf4_kr["pd_ratio"]
-            mask_kr      = pd_kr_df["dt"] >= start_kr
-            kr_ma_plot   = kr_ratio_s.rolling(pd_ma_n).mean().iloc[mask_kr.values].reset_index(drop=True)
-
-            last_kr_pd  = kr_ratio_s.iloc[-1]
-            last_kr_dy  = pd_kr_df["div_yield"].iloc[-1]
-            last_kr_cls = pd_kr_df["close"].iloc[-1]
-
-            kr_verdict = ("🔴 위험"   if not pd.isna(last_kr_pd) and last_kr_pd >= pd_danger_high else
-                          "🟡 주의"   if not pd.isna(last_kr_pd) and last_kr_pd >= pd_danger_high * 0.85 else
-                          "🟢 정상"   if not pd.isna(last_kr_pd) and last_kr_pd >= pd_normal_low else
-                          "🟢 저평가" if not pd.isna(last_kr_pd) else "⚪ N/A")
-
-            k1, k2, k3, k4 = st.columns(4)
-            k1.metric("지수 종가",    f"{last_kr_cls:,.2f}")
-            k2.metric("연배당수익률", f"{last_kr_dy*100:.2f}%")
-            k3.metric("P/D 비율",    f"{last_kr_pd:.1f}" if not pd.isna(last_kr_pd) else "N/A")
-            k4.metric("판정",         kr_verdict)
-
-            fig_kr_pd = go.Figure()
-            fig_kr_pd.add_hrect(
-                y0=pd_danger_high,
-                y1=max(kr_plot.dropna().max() + 2 if len(kr_plot.dropna()) > 0 else pd_danger_high + 2,
-                       pd_danger_high + 2),
-                fillcolor="red", opacity=0.06, line_width=0,
-                annotation_text="위험 구간", annotation_position="top left"
-            )
-            fig_kr_pd.add_hrect(
-                y0=0, y1=pd_normal_low,
-                fillcolor="teal", opacity=0.06, line_width=0,
-                annotation_text="저평가 구간", annotation_position="bottom left"
-            )
-            fig_kr_pd.add_trace(go.Scatter(
-                x=pf4_kr["dt"], y=kr_plot,
-                line=dict(color="#ef9a9a", width=2),
-                name=f"{pd_kr_market} P/D",
-                connectgaps=False
-            ))
-            fig_kr_pd.add_trace(go.Scatter(
-                x=pf4_kr["dt"], y=kr_ma_plot,
-                line=dict(color="orange", width=1.5, dash="dash"),
-                name=f"P/D {pd_ma_n}주 MA"
-            ))
-            fig_kr_pd.add_hline(y=pd_danger_high, line_color="red",  line_dash="dash",
-                                annotation_text=f"위험({pd_danger_high:.0f})")
-            fig_kr_pd.add_hline(y=pd_normal_low,  line_color="teal", line_dash="dash",
-                                annotation_text=f"정상하단({pd_normal_low:.0f})")
-            fig_kr_pd.update_layout(
-                title=f"{pd_kr_market} P/D 비율 (주봉 등락률 기반)",
-                template="plotly_dark", height=400,
-                legend=dict(orientation="h", y=1.05),
-                yaxis_title="P/D 비율"
-            )
-            st.plotly_chart(fig_kr_pd, use_container_width=True)
-
 
 if __name__ == "__main__":
     main()

@@ -5,22 +5,13 @@ from __future__ import annotations
 # AD Line: 다우30 / NASDAQ100 구성종목 일별 등락 집계로 계산
 
 import io
+import requests as _requests
 from datetime import datetime, timedelta
 
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.dates as mdates
-import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
-
-try:
-    from mplfinance.original_flavor import candlestick_ohlc
-    MPL_OK = True
-except ImportError:
-    MPL_OK = False
 
 try:
     import yfinance as yf
@@ -291,6 +282,56 @@ def classify(poh, aoh, gap, pol, aol, pt=2.0, at=3.0, gw=1.5, gd=2.5):
     if pol <= pt and aol <= at:                   return "NORMAL_WEAKNESS"
     return "NEUTRAL"
 
+def compute_hlab(df: pd.DataFrame, high_bars: int = 60, low_bars: int = 130) -> dict:
+    closes  = df["close"].values.astype(float)
+    ad_line = df["ad_line"].values.astype(float)
+    dts     = pd.to_datetime(df["date"].astype(str), format="%Y%m%d")
+    n = len(closes)
+
+    def _safe_slice(arr, end_idx, length):
+        start = max(0, end_idx - length)
+        return arr[start:end_idx], start
+
+    hb_window, hb_start = _safe_slice(closes, n, high_bars)
+    hb_idx_local = int(np.argmax(hb_window))
+    hb_idx = hb_start + hb_idx_local
+    hb_val, hb_dt, hb_ad = closes[hb_idx], dts.iloc[hb_idx], ad_line[hb_idx]
+
+    ha_window, ha_start = _safe_slice(closes, hb_start + hb_idx_local, high_bars)
+    if len(ha_window) > 0:
+        ha_idx_local = int(np.argmax(ha_window))
+        ha_idx = ha_start + ha_idx_local
+        ha_val, ha_dt, ha_ad = closes[ha_idx], dts.iloc[ha_idx], ad_line[ha_idx]
+    else:
+        ha_val, ha_dt, ha_ad = hb_val, hb_dt, hb_ad
+
+    lb_window, lb_start = _safe_slice(closes, n, low_bars)
+    lb_idx_local = int(np.argmin(lb_window))
+    lb_idx = lb_start + lb_idx_local
+    lb_val, lb_dt, lb_ad = closes[lb_idx], dts.iloc[lb_idx], ad_line[lb_idx]
+
+    la_window, la_start = _safe_slice(closes, lb_start + lb_idx_local, low_bars)
+    if len(la_window) > 0:
+        la_idx_local = int(np.argmin(la_window))
+        la_idx = la_start + la_idx_local
+        la_val, la_dt, la_ad = closes[la_idx], dts.iloc[la_idx], ad_line[la_idx]
+    else:
+        la_val, la_dt, la_ad = lb_val, lb_dt, lb_ad
+
+    bear_div     = bool(hb_val > ha_val and hb_ad < ha_ad)
+    bear_div_pct = abs((ha_ad - hb_ad) / ha_ad * 100) if (bear_div and ha_ad != 0) else 0.0
+    bull_div     = bool(lb_val < la_val and lb_ad > la_ad)
+    bull_div_pct = abs((lb_ad - la_ad) / la_ad * 100) if (bull_div and la_ad != 0) else 0.0
+
+    return dict(
+        hb_val=hb_val, hb_dt=hb_dt, hb_ad=hb_ad,
+        ha_val=ha_val, ha_dt=ha_dt, ha_ad=ha_ad,
+        lb_val=lb_val, lb_dt=lb_dt, lb_ad=lb_ad,
+        la_val=la_val, la_dt=la_dt, la_ad=la_ad,
+        bear_div=bear_div, bear_div_pct=bear_div_pct,
+        bull_div=bull_div, bull_div_pct=bull_div_pct,
+    )
+
 def compute_signals(df, lookback, pt, at, gw, gd):
     closes = df["close"].values.astype(float)
     ads    = df["ad_line"].values.astype(float)
@@ -313,53 +354,107 @@ def compute_signals(df, lookback, pt, at, gw, gd):
                 price_high=ph, ad_at_peak=ap)
 
 # ──────────────────────────────────────────────────────────────
-# 차트
+# 차트 — Plotly (호버 세로선 + H_a/H_b/L_a/L_b)
 # ──────────────────────────────────────────────────────────────
-def make_chart_img(df, market, sig, chart_months):
+def make_plotly_chart(df, market, sig, chart_months, hlab) -> go.Figure:
+    from plotly.subplots import make_subplots
+
     end_dt   = pd.to_datetime(df["date"].astype(str), format="%Y%m%d").max()
     start_dt = end_dt - pd.DateOffset(months=chart_months)
     mask     = pd.to_datetime(df["date"].astype(str), format="%Y%m%d") >= start_dt
     pf       = df[mask].copy().reset_index(drop=True)
     pf["dt"] = pd.to_datetime(pf["date"].astype(str), format="%Y%m%d")
-    ohlc     = pf[["dt", "open", "high", "low", "close"]].copy()
-    ohlc["dn"] = ohlc["dt"].map(mdates.date2num)
-    da   = int(sig["peak_label"].split("일전")[0]) if "일전" in sig["peak_label"] else 0
-    pdn  = mdates.date2num(pd.to_datetime(str(df["date"].iloc[-(da + 1)]), format="%Y%m%d"))
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 9), sharex=True,
-                                   gridspec_kw={"height_ratios": [1.4, 1]}, facecolor="#0e1117")
-    for ax in (ax1, ax2):
-        ax.set_facecolor("#0e1117"); ax.tick_params(colors="#aaa"); ax.spines[:].set_color("#333")
-    if MPL_OK:
-        candlestick_ohlc(ax1, ohlc[["dn", "open", "high", "low", "close"]].values,
-                         width=0.6, colorup="#26a69a", colordown="#ef5350", alpha=0.9)
+
+    hb_color = "rgba(255,80,80,0.95)"  if hlab["bear_div"] else "rgba(160,160,160,0.8)"
+    ha_color = "rgba(255,140,140,0.6)" if hlab["bear_div"] else "rgba(120,120,120,0.5)"
+    lb_color = "rgba(38,210,160,0.95)" if hlab["bull_div"] else "rgba(160,160,160,0.8)"
+    la_color = "rgba(38,210,160,0.6)"  if hlab["bull_div"] else "rgba(120,120,120,0.5)"
+
+    fig = make_subplots(rows=2, cols=1, shared_xaxes=True,
+                        row_heights=[0.52, 0.48], vertical_spacing=0.03,
+                        subplot_titles=(f"{MARKET_CFG[market]['label']}", "A/D Line (가격 겹침)"))
+
+    fig.add_trace(go.Candlestick(
+        x=pf["dt"], open=pf["open"], high=pf["high"], low=pf["low"], close=pf["close"],
+        increasing_line_color="#26a69a", decreasing_line_color="#ef5350",
+        name=market, showlegend=False,
+    ), row=1, col=1)
+
+    for val, color, dash, label in [
+        (hlab["hb_val"], hb_color, "dash", f"H_b {hlab['hb_val']:,.2f}"),
+        (hlab["ha_val"], ha_color, "dot",  f"H_a {hlab['ha_val']:,.2f}"),
+        (hlab["lb_val"], lb_color, "dash", f"L_b {hlab['lb_val']:,.2f}"),
+        (hlab["la_val"], la_color, "dot",  f"L_a {hlab['la_val']:,.2f}"),
+    ]:
+        fig.add_hline(y=val, line_color=color, line_dash=dash, line_width=1.5,
+                      annotation_text=label, annotation_font_color=color,
+                      annotation_font_size=11, row=1, col=1)
+
+    fig.add_trace(go.Scatter(
+        x=pf["dt"], y=pf["ad_line"].astype(float),
+        line=dict(color="#1e88e5", width=2.5), name="A/D Line",
+    ), row=2, col=1)
+
+    ad_min = pf["ad_line"].min(); ad_max = pf["ad_line"].max()
+    pr_min = pf["close"].min();   pr_max = pf["close"].max()
+    if pr_max != pr_min:
+        price_mapped = ad_min + (pf["close"] - pr_min) / (pr_max - pr_min) * (ad_max - ad_min)
     else:
-        ax1.plot(pf["dt"], pf["close"].astype(float), color="#26a69a", linewidth=1.5)
-    ax1.set_title(MARKET_CFG[market]["label"], color="#e0e0e0", fontsize=13)
-    ax1.set_ylabel("Index", color="#aaa"); ax1.grid(True, color="#1e2530", linewidth=0.5)
-    ax1.axvline(pdn, color="orange", linestyle=":", linewidth=1.2, alpha=0.6)
-    ax1.axhline(y=sig["price_high"], color="orange", linestyle="--", linewidth=1.2, alpha=0.8,
-                label=f"Peak {sig['price_high']:,.2f}")
-    ax1.legend(loc="upper left", fontsize=9, facecolor="#1a1a2e", labelcolor="#e0e0e0")
-    ax2.plot(pf["dt"], pf["ad_line"].astype(float), color="#1565c0", linewidth=1.8)
-    ax2.set_ylabel("A/D Line", color="#aaa"); ax2.set_title("A/D Line", color="#e0e0e0", fontsize=11)
-    ax2.grid(True, color="#1e2530", linewidth=0.5)
-    ax2.axvline(pdn, color="orange", linestyle=":", linewidth=1.2, alpha=0.6)
-    ax2.axhline(y=sig["ad_at_peak"], color="orange", linestyle="--", linewidth=1.2, alpha=0.8,
-                label=f"A/D at Peak {sig['ad_at_peak']:,.0f}")
-    ax2.legend(loc="upper left", fontsize=9, facecolor="#1a1a2e", labelcolor="#e0e0e0")
-    ax2.xaxis.set_major_locator(mdates.AutoDateLocator())
-    ax2.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m"))
-    fig.autofmt_xdate(rotation=30, ha="right")
-    box = (f"Peak: {sig['peak_label']}\nPrice vs Peak: {sig['price_off']:.2f}%\n"
-           f"A/D vs Peak:   {sig['ad_off']:.2f}%\nGap:           {sig['gap']:.2f}%")
-    ax1.text(0.01, 0.97, box, transform=ax1.transAxes, va="top", ha="left",
-             fontsize=10, color="white", family="monospace",
-             bbox=dict(boxstyle="round,pad=0.5", facecolor=sig["color"], alpha=0.9))
-    plt.tight_layout(pad=1.5)
-    buf = io.BytesIO()
-    plt.savefig(buf, format="png", dpi=150, bbox_inches="tight", facecolor=fig.get_facecolor())
-    plt.close(fig); buf.seek(0)
-    return buf.read()
+        price_mapped = pf["ad_line"]
+    fig.add_trace(go.Scatter(
+        x=pf["dt"], y=price_mapped,
+        line=dict(color="rgba(180,180,180,0.45)", width=1.2),
+        name="가격(겹침)",
+    ), row=2, col=1)
+
+    for val, color, dash, label in [
+        (hlab["hb_ad"], hb_color, "dash", f"A/D@H_b {hlab['hb_ad']:,.0f}"),
+        (hlab["ha_ad"], ha_color, "dot",  f"A/D@H_a {hlab['ha_ad']:,.0f}"),
+        (hlab["lb_ad"], lb_color, "dash", f"A/D@L_b {hlab['lb_ad']:,.0f}"),
+        (hlab["la_ad"], la_color, "dot",  f"A/D@L_a {hlab['la_ad']:,.0f}"),
+    ]:
+        fig.add_hline(y=val, line_color=color, line_dash=dash, line_width=1.5,
+                      annotation_text=label, annotation_font_color=color,
+                      annotation_font_size=10, row=2, col=1)
+
+    if hlab["bear_div"]:
+        fig.add_shape(type="line",
+            x0=hlab["ha_dt"], y0=hlab["ha_ad"], x1=hlab["hb_dt"], y1=hlab["hb_ad"],
+            line=dict(color="rgba(255,80,80,0.85)", width=2, dash="dash"), row=2, col=1)
+        mid_dt = hlab["ha_dt"] + (hlab["hb_dt"] - hlab["ha_dt"]) / 2
+        fig.add_annotation(x=mid_dt, y=(hlab["ha_ad"]+hlab["hb_ad"])/2,
+                           text=f"⚠ {hlab['bear_div_pct']:.1f}%",
+                           font=dict(color="rgba(255,80,80,0.9)", size=11),
+                           showarrow=False, row=2, col=1)
+    if hlab["bull_div"]:
+        fig.add_shape(type="line",
+            x0=hlab["la_dt"], y0=hlab["la_ad"], x1=hlab["lb_dt"], y1=hlab["lb_ad"],
+            line=dict(color="rgba(38,210,160,0.85)", width=2, dash="dash"), row=2, col=1)
+        mid_dt = hlab["la_dt"] + (hlab["lb_dt"] - hlab["la_dt"]) / 2
+        fig.add_annotation(x=mid_dt, y=(hlab["la_ad"]+hlab["lb_ad"])/2,
+                           text=f"✓ {hlab['bull_div_pct']:.1f}%",
+                           font=dict(color="rgba(38,210,160,0.9)", size=11),
+                           showarrow=False, row=2, col=1)
+
+    div_text = (f"  ⚠ 부정적 불일치 {hlab['bear_div_pct']:.1f}%" if hlab["bear_div"]
+                else f"  ✓ 긍정적 불일치 {hlab['bull_div_pct']:.1f}%" if hlab["bull_div"] else "")
+
+    fig.update_layout(
+        template="plotly_dark", height=680,
+        title=dict(text=f"{MARKET_CFG[market]['label']} — {sig['verdict']}{div_text}", font_size=13),
+        xaxis_rangeslider_visible=False,
+        hovermode="x unified",
+        legend=dict(orientation="h", y=1.01, x=0),
+        margin=dict(l=10, r=80, t=55, b=10),
+    )
+    fig.update_xaxes(
+        showspikes=True, spikemode="across", spikesnap="cursor",
+        spikethickness=1, spikecolor="#aaa", spikedash="dot",
+        tickformat="%m/%d", dtick=7*24*60*60*1000,
+        tickangle=-45, tickfont=dict(size=9),
+    )
+    fig.update_yaxes(showspikes=True, spikethickness=1, spikecolor="#aaa")
+    return fig
 
 # ──────────────────────────────────────────────────────────────
 # 메인
@@ -380,6 +475,8 @@ def main():
         st.subheader("분석 파라미터")
         lookback     = st.slider("Lookback (일)",      20, 252, 126)
         chart_months = st.slider("차트 표시 기간 (월)", 1,  24,   6)
+        high_bars    = st.slider("고점 탐색 H_b (일)",  10, 500, 60)
+        low_bars     = st.slider("저점 탐색 L_b (일)",  10, 500, 130)
         with st.expander("임계값 세부 설정"):
             price_thr  = st.number_input("가격 고점 근접 기준 %", value=2.0, step=0.1)
             ad_thr     = st.number_input("A/D 고점 근접 기준 %",  value=3.0, step=0.1)
@@ -422,8 +519,9 @@ def main():
         st.warning(f"데이터 부족: {len(df)}행"); return
 
     sig  = compute_signals(df, lookback, price_thr, ad_thr, gap_warn, gap_danger)
+    hlab = compute_hlab(df, high_bars=high_bars, low_bars=low_bars)
     last = df.iloc[-1]
-    tab1, tab2, tab3, tab4 = st.tabs(["📈 A/D Line", "⚡ MI 탄력지수", "🏔 NH-NL", "📊 P/D 비율"])
+    tab1, tab2, tab3 = st.tabs(["📈 A/D Line", "⚡ MI 탄력지수", "🏔 NH-NL"])
 
     with tab1:
         gc = "#00897b" if sig["gap"] >= 0 else "#c62828"
@@ -446,7 +544,7 @@ def main():
             f'&nbsp;&nbsp;<span style="color:#ffffffcc">{sig["note"]}</span></div>',
             unsafe_allow_html=True)
         try:
-            st.image(make_chart_img(df, market, sig, chart_months), use_container_width=True)
+            st.plotly_chart(make_plotly_chart(df, market, sig, chart_months, hlab), use_container_width=True)
         except Exception as e:
             st.error(f"차트 오류: {e}")
         with st.expander("📋 원시 데이터"):
@@ -506,49 +604,6 @@ def main():
         else:
             st.warning("NH-NL 데이터를 가져오지 못했습니다.")
 
-    with tab4:
-        st.subheader("📊 P/D 비율 (Price ÷ Dividend)")
-        st.caption("스탠 와인스태인: 지수 종가 ÷ 연간 배당금. 26↑=위험, 14~17=정상.")
-        pd_ma_n        = st.slider("MA 기간 (주)", 4, 52, 13, key="us_pd_ma")
-        pd_danger_high = st.number_input("위험 기준", value=26.0, step=1.0, key="us_pd_dh")
-        pd_normal_low  = st.number_input("정상 하단", value=14.0, step=1.0, key="us_pd_nl")
-        with st.spinner("P/D 로딩 중…"):
-            pd_df, pd_err = fetch_pd(market, chart_months)
-        if pd_err:
-            st.error(f"P/D 오류: {pd_err}")
-        elif pd_df is None or pd_df.empty:
-            st.warning("P/D 데이터 없음.")
-        else:
-            end_pd   = pd_df["dt"].max()
-            start_pd = end_pd - pd.DateOffset(months=chart_months)
-            pf4      = pd_df[pd_df["dt"] >= start_pd].copy().reset_index(drop=True)
-            prs      = pd_df["pd_ratio"]
-            mask_pd  = pd_df["dt"] >= start_pd
-            pma_plot = prs.rolling(pd_ma_n).mean().iloc[mask_pd.values].reset_index(drop=True)
-            lp = prs.iloc[-1]; ldy = pd_df["div_yield"].iloc[-1]; lcl = pd_df["close"].iloc[-1]
-            pv = ("🔴 위험"   if not pd.isna(lp) and lp >= pd_danger_high else
-                  "🟡 주의"   if not pd.isna(lp) and lp >= pd_danger_high * 0.85 else
-                  "🟢 정상"   if not pd.isna(lp) and lp >= pd_normal_low else
-                  "🟢 저평가" if not pd.isna(lp) else "⚪ N/A")
-            p1, p2, p3, p4 = st.columns(4)
-            p1.metric("지수 종가",    f"{lcl:,.2f}")
-            p2.metric("연배당수익률", f"{ldy * 100:.2f}%")
-            p3.metric("P/D 비율",     f"{lp:.1f}" if not pd.isna(lp) else "N/A")
-            p4.metric("판정", pv)
-            st.info("📌 P/D = 지수 종가 ÷ 연간 실제 배당금. 26↑=위험, 14~17=정상 (스탠 와인스태인).")
-            fig_pd = go.Figure()
-            y_max = max(pf4["pd_ratio"].dropna().max() + 2 if not pf4["pd_ratio"].dropna().empty else pd_danger_high + 2, pd_danger_high + 2)
-            fig_pd.add_hrect(y0=pd_danger_high, y1=y_max, fillcolor="red",  opacity=0.06, line_width=0,
-                annotation_text="위험 구간", annotation_position="top left")
-            fig_pd.add_hrect(y0=0, y1=pd_normal_low,  fillcolor="teal", opacity=0.06, line_width=0,
-                annotation_text="저평가 구간", annotation_position="bottom left")
-            fig_pd.add_trace(go.Scatter(x=pf4["dt"], y=pf4["pd_ratio"], line=dict(color="#42a5f5", width=2), name="P/D"))
-            fig_pd.add_trace(go.Scatter(x=pf4["dt"], y=pma_plot, line=dict(color="orange", width=1.5, dash="dash"), name=f"{pd_ma_n}주 MA"))
-            fig_pd.add_hline(y=pd_danger_high, line_color="red",  line_dash="dash", annotation_text=f"위험({pd_danger_high:.0f})")
-            fig_pd.add_hline(y=pd_normal_low,  line_color="teal", line_dash="dash", annotation_text=f"정상하단({pd_normal_low:.0f})")
-            fig_pd.update_layout(title=f"{market} P/D 비율 (주봉)", template="plotly_dark", height=420,
-                legend=dict(orientation="h", y=1.05), yaxis_title="P/D 비율")
-            st.plotly_chart(fig_pd, use_container_width=True)
 
 if __name__ == "__main__":
     main()
