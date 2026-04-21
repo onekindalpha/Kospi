@@ -1,11 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
-"""
-KOSPI / KOSDAQ Breadth Dashboard (Streamlit)
-실행:
-  pip install streamlit plotly pandas requests finance-datareader mplfinance matplotlib
-  KRX_AUTH_KEY=your_key streamlit run kospi_breadth_dashboard.py
-"""
+# KOSPI / KOSDAQ Breadth Dashboard (Streamlit)
+# 실행: streamlit run kospi_breadth_dashboard_v1.py
 # GitHub raw CSV URL (로컬에서 data/ 폴더 push 후 Cloud에서 읽음)
 GITHUB_RAW = "https://raw.githubusercontent.com/onekindalpha/Kospi/main/data"
 GITHUB_BREADTH = {
