@@ -5,7 +5,8 @@ indicator("US Breadth A/D v16 KR", overlay=false, max_labels_count=100, max_line
 market       = input.string("NYSE", "Market", options=["NYSE","NASDAQ"])
 tfBreadth    = input.timeframe("D", "Breadth timeframe")
 baseValue    = input.float(50000, "A/D Line Base Value")
-recentBars   = input.int(60, "탐색 구간 (바 수)", minval=10, maxval=300)
+highBars     = input.int(60,  "고점 탐색 구간 H_b (바 수)", minval=10, maxval=500)
+lowBars      = input.int(130, "저점 탐색 구간 L_b (바 수)", minval=10, maxval=500)
 showPrice    = input.bool(true,  "가격 곡선 겹쳐 표시")
 showDivLines = input.bool(true,  "불일치 연결선 표시")
 warnPct      = input.float(0.5,  "주의 기준 %", step=0.1, minval=0.0)
@@ -20,36 +21,36 @@ adDiff    = nz(adv, 0) - nz(decl, 0)
 adLineRaw = baseValue + ta.cum(adDiff)
 
 // ── 가격 스케일
-priceMin    = ta.lowest(close,     recentBars * 2)
-priceMax    = ta.highest(close,    recentBars * 2)
-adMin       = ta.lowest(adLineRaw, recentBars * 2)
-adMax       = ta.highest(adLineRaw,recentBars * 2)
+priceMin    = ta.lowest(close,     math.max(highBars, lowBars) * 2)
+priceMax    = ta.highest(close,    math.max(highBars, lowBars) * 2)
+adMin       = ta.lowest(adLineRaw, math.max(highBars, lowBars) * 2)
+adMax       = ta.highest(adLineRaw,math.max(highBars, lowBars) * 2)
 priceMapped = priceMax != priceMin ? adMin + (close - priceMin) / (priceMax - priceMin) * (adMax - adMin) : adLineRaw
 
 plot(adLineRaw, "A/D Line", color=color.new(color.blue, 0), linewidth=2)
 plot(showPrice ? priceMapped : na, "Price", color=color.new(color.gray, 40), linewidth=1)
 
 // ── H_b: 최근 구간 최고점 (실시간)
-hbVal = ta.highest(close, recentBars)
-hbN   = math.abs(ta.highestbars(close, recentBars))
+hbVal = ta.highest(close, highBars)
+hbN   = math.abs(ta.highestbars(close, highBars))
 hbBar = bar_index - hbN
 hbAD  = adLineRaw[hbN]
 
 // ── H_a: 이전 구간 최고점
-haVal = ta.highest(close[recentBars], recentBars)
-haN   = recentBars + math.abs(ta.highestbars(close[recentBars], recentBars))
+haVal = ta.highest(close[highBars], highBars)
+haN   = highBars + math.abs(ta.highestbars(close[highBars], highBars))
 haBar = bar_index - haN
 haAD  = adLineRaw[haN]
 
 // ── L_b: 최근 구간 최저점 (실시간)
-lbVal = ta.lowest(close, recentBars)
-lbN   = math.abs(ta.lowestbars(close, recentBars))
+lbVal = ta.lowest(close, lowBars)
+lbN   = math.abs(ta.lowestbars(close, lowBars))
 lbBar = bar_index - lbN
 lbAD  = adLineRaw[lbN]
 
 // ── L_a: 이전 구간 최저점
-laVal = ta.lowest(close[recentBars], recentBars)
-laN   = recentBars + math.abs(ta.lowestbars(close[recentBars], recentBars))
+laVal = ta.lowest(close[lowBars], lowBars)
+laN   = lowBars + math.abs(ta.lowestbars(close[lowBars], lowBars))
 laBar = bar_index - laN
 laAD  = adLineRaw[laN]
 
