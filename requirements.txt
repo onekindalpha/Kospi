@@ -8,3 +8,4 @@ mplfinance>=0.12.9
 finance-datareader>=0.9.50
 yfinance>=0.2.36
 pykrx>=1.0.45
+pandas-datareader>=0.10.0
