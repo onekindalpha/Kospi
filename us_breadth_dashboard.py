@@ -34,7 +34,11 @@ except ImportError:
 # ──────────────────────────────────────────────────────────────
 MARKET_CFG = {
     "NYSE": {
-        "adv_sym":  "^NYAD",   # NYSE Advance-Decline
+        # ^ADD = NYSE daily net advances (advances minus declines, raw daily value)
+        # ^NYAD = cumulative AD line (use diff() to get daily net)
+        # We prefer ^ADD as it's the actual daily diff, not cumulative
+        "adv_sym":  "^ADD",    # NYSE Net Advances (daily AD difference)
+        "adv_alt":  "^NYAD",   # fallback: cumulative AD line
         "idx_sym":  "^DJI",
         "nhi_sym":  "^NYHGH",  # NYSE New Highs
         "nlo_sym":  "^NYLOW",  # NYSE New Lows
@@ -43,7 +47,8 @@ MARKET_CFG = {
         "yf_pd_sym": "^DJI",
     },
     "NASDAQ": {
-        "adv_sym":  "^NAAD",   # NASDAQ Advance-Decline
+        "adv_sym":  "^ADN",    # NASDAQ Net Advances (daily AD difference)
+        "adv_alt":  "^NAAD",   # fallback: cumulative AD line
         "idx_sym":  "^IXIC",
         "nhi_sym":  "^NAHGH",  # NASDAQ New Highs
         "nlo_sym":  "^NALO",   # NASDAQ New Lows
@@ -67,31 +72,66 @@ STATUS_MAP = {
 # 데이터 수집
 # ──────────────────────────────────────────────────────────────
 def _yf_history(sym: str, start: str, end: str) -> pd.Series:
-    """yfinance Ticker.history()로 종가 Series. start/end YYYYMMDD"""
+    """yfinance Ticker.history()로 종가 Series. start/end YYYYMMDD.
+    ^ADD, ^ADN 같은 breadth 심볼도 안정적으로 처리."""
     s = pd.to_datetime(start, format="%Y%m%d").strftime("%Y-%m-%d")
     e = (pd.to_datetime(end, format="%Y%m%d") + timedelta(days=1)).strftime("%Y-%m-%d")
-    raw = yf.Ticker(sym).history(start=s, end=e, auto_adjust=True)
+    ticker = yf.Ticker(sym)
+    try:
+        raw = ticker.history(start=s, end=e, auto_adjust=True)
+    except Exception as ex:
+        raise RuntimeError(f"yfinance {sym} 조회 오류: {ex}")
     if raw is None or raw.empty:
-        raise RuntimeError(f"yfinance {sym} 데이터 없음")
-    raw.index = pd.to_datetime(raw.index).tz_localize(None)
+        raise RuntimeError(f"yfinance {sym} 데이터 없음 (empty)")
+    # timezone 제거
+    if hasattr(raw.index, 'tz') and raw.index.tz is not None:
+        raw.index = raw.index.tz_localize(None)
+    else:
+        raw.index = pd.to_datetime(raw.index)
+    # Close 컬럼 추출 — MultiIndex 방어
+    if isinstance(raw.columns, pd.MultiIndex):
+        raw.columns = raw.columns.get_level_values(0)
+    if "Close" not in raw.columns:
+        raise RuntimeError(f"yfinance {sym}: Close 컬럼 없음. 컬럼={list(raw.columns)}")
     s_out = pd.to_numeric(raw["Close"], errors="coerce").dropna()
+    if s_out.empty:
+        raise RuntimeError(f"yfinance {sym}: 유효한 종가 데이터 없음")
     return s_out.sort_index()
+
+def _yf_history_with_fallback(primary: str, fallback: str, start: str, end: str,
+                               is_cumulative_fallback: bool = True) -> tuple[pd.Series, bool]:
+    """primary 심볼 시도, 실패 시 fallback 사용. (data, is_cumulative) 반환"""
+    try:
+        data = _yf_history(primary, start, end)
+        return data, False  # ^ADD/^ADN은 이미 daily diff값
+    except Exception:
+        pass
+    try:
+        data = _yf_history(fallback, start, end)
+        return data, is_cumulative_fallback  # ^NYAD/^NAAD는 누적값
+    except Exception as ex:
+        raise RuntimeError(f"브레드스 데이터 수집 실패 ({primary}, {fallback}): {ex}")
 
 @st.cache_data(show_spinner=False, ttl=3600)
 def fetch_breadth(market: str, start: str, end: str, base: float = 50000.0) -> pd.DataFrame:
     """
-    yfinance ^NYAD / ^NAAD: NYSE/NASDAQ Advance-Decline Line (누적값).
-    일별 차이(diff)를 AD차이로, 누적값에서 AD Line 재구성.
+    NYSE: ^ADD (일별 순등락종목수, daily net advances) → 직접 AD diff
+          fallback: ^NYAD (누적 AD Line) → diff()로 변환
+    NASDAQ: ^ADN → fallback ^NAAD
     """
     if not YF_OK:
         raise RuntimeError("yfinance 미설치")
-    cfg   = MARKET_CFG[market]
-    ad_s  = _yf_history(cfg["adv_sym"], start, end)
-    # ^NYAD는 이미 누적 AD Line — 일별 diff가 ADV-DECL 차이
-    ad_diff = ad_s.diff().fillna(0)
-    # advances/declines 근사: diff > 0 이면 상승 우세
+    cfg = MARKET_CFG[market]
+    ad_s, is_cumulative = _yf_history_with_fallback(
+        cfg["adv_sym"], cfg["adv_alt"], start, end, is_cumulative_fallback=True
+    )
+    if is_cumulative:
+        # 누적 AD Line에서 일별 차이 추출
+        ad_diff = ad_s.diff().fillna(0)
+    else:
+        # ^ADD / ^ADN은 이미 일별 순등락 값
+        ad_diff = ad_s.fillna(0)
     df = pd.DataFrame({
-        "ad_raw":  ad_s.values,
         "ad_diff": ad_diff.values,
     }, index=ad_s.index)
     df["advances"] = df["ad_diff"].clip(lower=0)
@@ -111,7 +151,12 @@ def fetch_index(market: str, start: str, end: str) -> pd.DataFrame:
     raw = yf.Ticker(cfg["idx_sym"]).history(start=s, end=e, auto_adjust=True)
     if raw is None or raw.empty:
         raise RuntimeError(f"{cfg['idx_sym']} 데이터 없음")
-    raw.index = pd.to_datetime(raw.index).tz_localize(None)
+    if hasattr(raw.index, 'tz') and raw.index.tz is not None:
+        raw.index = raw.index.tz_localize(None)
+    else:
+        raw.index = pd.to_datetime(raw.index)
+    if isinstance(raw.columns, pd.MultiIndex):
+        raw.columns = raw.columns.get_level_values(0)
     out = pd.DataFrame({
         "date":  raw.index.strftime("%Y%m%d"),
         "open":  pd.to_numeric(raw["Open"],  errors="coerce"),
@@ -123,7 +168,8 @@ def fetch_index(market: str, start: str, end: str) -> pd.DataFrame:
 
 @st.cache_data(show_spinner=False, ttl=3600)
 def fetch_nhnl(market: str, start: str, end: str) -> pd.DataFrame | None:
-    """yfinance ^NYHGH/^NYLOW 또는 ^NAHGH/^NALO — 주봉 합산"""
+    """yfinance ^NYHGH/^NYLOW 또는 ^NAHGH/^NALO — 주봉 합산.
+    실패 시 None 반환 (NH-NL 탭에서 경고 표시)."""
     if not YF_OK:
         return None
     cfg = MARKET_CFG[market]
@@ -131,7 +177,12 @@ def fetch_nhnl(market: str, start: str, end: str) -> pd.DataFrame | None:
         nhi_s = _yf_history(cfg["nhi_sym"], start, end)
         nlo_s = _yf_history(cfg["nlo_sym"], start, end)
         df = pd.DataFrame({"new_highs": nhi_s, "new_lows": nlo_s}).dropna()
-        weekly = df.resample("W-FRI").sum()
+        if df.empty:
+            return None
+        # ^NYHGH 등은 daily count — 주봉은 마지막값(last)으로 대표
+        weekly_hi = df["new_highs"].resample("W-FRI").last()
+        weekly_lo = df["new_lows"].resample("W-FRI").last()
+        weekly = pd.DataFrame({"new_highs": weekly_hi, "new_lows": weekly_lo}).dropna()
         weekly = weekly[weekly["new_highs"] > 0]
         weekly["nhnl"] = weekly["new_highs"] - weekly["new_lows"]
         weekly["date"] = weekly.index.strftime("%Y%m%d")
@@ -151,13 +202,21 @@ def fetch_pd(market: str, months: int):
         ticker = yf.Ticker(cfg["yf_pd_sym"])
         ph = ticker.history(start=start_d.strftime("%Y-%m-%d"),
                             end=end_d.strftime("%Y-%m-%d"), auto_adjust=True)
-        if ph.empty:
+        if ph is None or ph.empty:
             return None, "가격 데이터 없음"
-        ph.index = pd.to_datetime(ph.index).tz_localize(None)
-        close_s = ph["Close"].sort_index()
+        if hasattr(ph.index, 'tz') and ph.index.tz is not None:
+            ph.index = ph.index.tz_localize(None)
+        else:
+            ph.index = pd.to_datetime(ph.index)
+        if isinstance(ph.columns, pd.MultiIndex):
+            ph.columns = ph.columns.get_level_values(0)
+        close_s = pd.to_numeric(ph["Close"], errors="coerce").dropna().sort_index()
         divs = ticker.dividends
         if divs is not None and not divs.empty:
-            divs.index = pd.to_datetime(divs.index).tz_localize(None)
+            if hasattr(divs.index, 'tz') and divs.index.tz is not None:
+                divs.index = divs.index.tz_localize(None)
+            else:
+                divs.index = pd.to_datetime(divs.index)
             divs_d  = divs.reindex(close_s.index, fill_value=0.0)
             ann_div = divs_d.rolling(365, min_periods=1).sum()
         else:
