@@ -897,16 +897,16 @@ def main():
         elif pd_df is None or pd_df.empty:
             st.warning("P/D 데이터를 가져오지 못했습니다.")
         else:
-            end_pd   = pd_df["date"].max()
+            end_pd   = pd.to_datetime(pd_df["date"].max(), format="%Y%m%d")
             start_pd = end_pd - pd.DateOffset(months=chart_months)
-            pf4 = pd_df[pd_df["date"] >= start_pd].copy().reset_index(drop=True)
+            pd_df["dt"] = pd.to_datetime(pd_df["date"], format="%Y%m%d")
+            pf4 = pd_df[pd_df["dt"] >= start_pd].copy().reset_index(drop=True)
 
             pd_ratio_s  = pd_df["pd_ratio"]
             pd_ma_s     = pd_ratio_s.rolling(pd_ma_n).mean()
             pd_plot     = pf4["pd_ratio"]
-            pd_ma_plot  = pd_ratio_s.rolling(pd_ma_n).mean().iloc[
-                            pd_df["date"] >= start_pd
-                          ].reset_index(drop=True)
+            mask_pd     = pd_df["dt"] >= start_pd
+            pd_ma_plot  = pd_ratio_s.rolling(pd_ma_n).mean().iloc[mask_pd.values].reset_index(drop=True)
 
             last_pd    = pd_ratio_s.iloc[-1]
             last_pd_ma = pd_ma_s.iloc[-1]
@@ -947,12 +947,12 @@ def main():
                 annotation_text="저평가 구간", annotation_position="bottom left"
             )
             fig_pd.add_trace(go.Scatter(
-                x=pf4["date"], y=pd_plot,
+                x=pf4["dt"], y=pd_plot,
                 line=dict(color="#42a5f5", width=2),
                 name="P/D 비율"
             ))
             fig_pd.add_trace(go.Scatter(
-                x=pf4["date"], y=pd_ma_plot,
+                x=pf4["dt"], y=pd_ma_plot,
                 line=dict(color="orange", width=1.5, dash="dash"),
                 name=f"P/D {pd_ma_n}주 MA"
             ))
@@ -1032,15 +1032,15 @@ def main():
         elif pd_kr_df is None or pd_kr_df.empty:
             st.warning("국장 P/D 데이터를 가져오지 못했습니다.")
         else:
-            end_kr   = pd_kr_df["date"].max()
+            end_kr   = pd.to_datetime(pd_kr_df["date"].max(), format="%Y%m%d")
             start_kr = end_kr - pd.DateOffset(months=chart_months)
-            pf4_kr   = pd_kr_df[pd_kr_df["date"] >= start_kr].copy().reset_index(drop=True)
+            pd_kr_df["dt"] = pd.to_datetime(pd_kr_df["date"], format="%Y%m%d")
+            pf4_kr   = pd_kr_df[pd_kr_df["dt"] >= start_kr].copy().reset_index(drop=True)
             kr_ratio_s   = pd_kr_df["pd_ratio"]
             kr_ma_s      = kr_ratio_s.rolling(pd_ma_n).mean()
             kr_plot      = pf4_kr["pd_ratio"]
-            kr_ma_plot   = kr_ratio_s.rolling(pd_ma_n).mean().iloc[
-                             pd_kr_df["date"] >= start_kr
-                           ].reset_index(drop=True)
+            mask_kr      = pd_kr_df["dt"] >= start_kr
+            kr_ma_plot   = kr_ratio_s.rolling(pd_ma_n).mean().iloc[mask_kr.values].reset_index(drop=True)
 
             last_kr_pd  = kr_ratio_s.iloc[-1]
             last_kr_dy  = pd_kr_df["div_yield"].iloc[-1]
@@ -1071,13 +1071,13 @@ def main():
                 annotation_text="저평가 구간", annotation_position="bottom left"
             )
             fig_kr_pd.add_trace(go.Scatter(
-                x=pf4_kr["date"], y=kr_plot,
+                x=pf4_kr["dt"], y=kr_plot,
                 line=dict(color="#ef9a9a", width=2),
                 name=f"{pd_kr_market} P/D",
                 connectgaps=False
             ))
             fig_kr_pd.add_trace(go.Scatter(
-                x=pf4_kr["date"], y=kr_ma_plot,
+                x=pf4_kr["dt"], y=kr_ma_plot,
                 line=dict(color="orange", width=1.5, dash="dash"),
                 name=f"P/D {pd_ma_n}주 MA"
             ))
