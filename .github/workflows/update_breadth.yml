@@ -23,7 +23,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install requests pandas FinanceDataReader
+          pip install requests pandas finance-datareader
 
       - name: Run update script
         env:
