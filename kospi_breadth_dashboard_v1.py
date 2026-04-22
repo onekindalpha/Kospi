@@ -12,6 +12,10 @@ GITHUB_INDEX = {
     "KOSPI":  f"{GITHUB_RAW}/kospi_index.csv",
     "KOSDAQ": f"{GITHUB_RAW}/kosdaq_index.csv",
 }
+GITHUB_NHNL = {
+    "KOSPI":  f"{GITHUB_RAW}/kospi_nhnl.csv",
+    "KOSDAQ": f"{GITHUB_RAW}/kosdaq_nhnl.csv",
+}
 
 import hashlib
 import io
@@ -59,6 +63,7 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import requests
+import traceback
 import streamlit as st
 
 try:
@@ -94,113 +99,154 @@ STATUS_MAP = {
 # ──────────────────────────────────────────────────────────────
 # NH-NL 캐시 경로
 # ──────────────────────────────────────────────────────────────
-NHNL_CACHE_DIR = Path("./nhnl_cache")
+NHNL_CACHE_DIR = Path("./nhnl_cache_v2")
 
 def _nhnl_cache_path(market: str, date_str: str) -> Path:
     NHNL_CACHE_DIR.mkdir(exist_ok=True)
-    return NHNL_CACHE_DIR / f"{market}_{date_str}.csv"
+    return NHNL_CACHE_DIR / f"nhnl_v2_{market}_{date_str}.csv"
 
 def load_nhnl_cache(market: str, date_str: str) -> pd.DataFrame | None:
     p = _nhnl_cache_path(market, date_str)
-    if p.exists():
-        return pd.read_csv(p, dtype={"date": str})
-    return None
+    if not p.exists():
+        return None
+    try:
+        df = pd.read_csv(p, dtype={"date": str})
+    except Exception:
+        return None
+    # 예전 잘못 생성된 짧은 캐시(예: 5주치)는 자동 무시
+    if df.empty or len(df) < 20:
+        return None
+    return df
 
 def save_nhnl_cache(df: pd.DataFrame, market: str, date_str: str):
     p = _nhnl_cache_path(market, date_str)
     df.to_csv(p, index=False)
 
-def compute_nhnl_pykrx(market: str, end_date: str, prog=None) -> pd.DataFrame:
+
+def _is_common_stock_krx(df: pd.DataFrame) -> pd.Series:
     """
-    pykrx로 KOSPI/KOSDAQ 전체 종목 OHLCV 일괄 수집 →
-    매 거래일 기준 52주(260거래일) 신고가/신저가 종목 수 계산 →
-    주봉(금요일) 집계 반환.
-    pykrx는 KRX 웹에서 직접 긁어오므로 API KEY 불필요, 속도 빠름.
+    책 취지에 맞게 보통주 중심으로 필터링한다.
+    우선주는 이름/단축코드 패턴으로 최대한 제거한다.
+    ETF/ETN/ELW/스팩/리츠/펀드/인버스/레버리지도 제외한다.
     """
-    try:
-        from pykrx import stock as pykrx_stock
-    except ImportError:
-        raise RuntimeError("pykrx 미설치: pip install pykrx")
+    if df.empty:
+        return pd.Series(dtype=bool)
 
-    end_dt   = pd.to_datetime(end_date, format="%Y%m%d")
-    start_dt = end_dt - timedelta(days=420)  # 52주(260거래일) + 여유
-    start_str = start_dt.strftime("%Y%m%d")
-    end_str   = end_dt.strftime("%Y%m%d")
+    name_col = next((c for c in ["ISU_ABBRV", "ISU_NM", "Name", "name"] if c in df.columns), None)
+    code_col = next((c for c in ["ISU_SRT_CD", "Code", "Symbol", "code"] if c in df.columns), None)
 
-    mkt = "KOSPI" if market == "KOSPI" else "KOSDAQ"
+    name = df[name_col].astype(str).fillna("") if name_col else pd.Series([""] * len(df), index=df.index)
+    code = df[code_col].astype(str).fillna("") if code_col else pd.Series([""] * len(df), index=df.index)
 
-    # 1) 종목 리스트
-    tickers = pykrx_stock.get_market_ticker_list(end_str, market=mkt)
-    if not tickers:
-        return pd.DataFrame()
+    exclude_pat = (
+        r"(?:우$|우B$|우C$|[0-9]우$|스팩|리츠|REIT|ETF|ETN|ELW|KODEX|TIGER|KOSEF|KBSTAR|ARIRANG|HANARO|"
+        r"SOL|ACE|TIMEFOLIO|TREX|SMART|FOCUS|마이티|TRUE|QV|RISE|레버리지|인버스|선물|채권|"
+        r"펀드|액티브|TDF|TRF|BLN|회사채|국고채)"
+    )
+    bad_name = name.str.contains(exclude_pat, case=False, regex=True, na=False)
 
-    total = len(tickers)
-    if prog:
-        prog.progress(0.0, text=f"종목 리스트 로드 완료 ({total}개), 가격 수집 중…")
+    # KRX 보통주 외의 특수코드/우선주/기타 증권 일부 제거 보조
+    bad_code = code.str.endswith(("K", "L", "M", "N"))  # 예외적 코드 방어
+    return ~(bad_name | bad_code)
 
-    # 2) 전체 종목 종가 한 번에 수집 (날짜×종목 피벗)
-    # get_market_ohlcv_by_date 는 단일 종목용이므로
-    # get_market_ohlcv 로 날짜별 전체 종목 가져온 뒤 피벗
-    all_closes = {}
-    batch_size = 50
-    for batch_i in range(0, total, batch_size):
-        batch = tickers[batch_i: batch_i + batch_size]
-        for code in batch:
-            try:
-                df_raw = pykrx_stock.get_market_ohlcv_by_date(start_str, end_str, code)
-                if df_raw is None or df_raw.empty:
-                    continue
-                df_raw.index = pd.to_datetime(df_raw.index)
-                close_col = next((c for c in df_raw.columns
-                                  if str(c).strip() in ("종가", "Close", "close")), None)
-                if close_col is None and len(df_raw.columns) >= 4:
-                    close_col = df_raw.columns[3]  # 종가는 보통 4번째
-                if close_col is None:
-                    continue
-                all_closes[code] = df_raw[close_col].rename(code)
-            except Exception:
-                continue
+
+def compute_nhnl_pykrx(market: str, end_date: str, prog=None, auth_key: str = "", chart_start_date: str | None = None) -> pd.DataFrame:
+    """
+    책 기준 NH-NL 구현:
+    - 보통주 중심
+    - 종가 기준
+    - 52주(252거래일) 신고가/신저가 돌파 종목 수
+    - 주간 합계(W-FRI)
+    데이터 소스는 pykrx/FDR 대신 KRX 일별 전체종목 스냅샷 사용.
+    """
+    if not auth_key or not str(auth_key).strip():
+        raise RuntimeError("NH-NL은 현재 KRX API AUTH_KEY 기반으로 계산합니다. 사이드바의 KRX AUTH_KEY를 입력하세요.")
+
+    end_dt = pd.to_datetime(end_date, format="%Y%m%d")
+    if chart_start_date:
+        chart_start_dt = pd.to_datetime(chart_start_date, format="%Y%m%d")
+        start_dt = chart_start_dt - timedelta(days=420)
+    else:
+        start_dt = end_dt - timedelta(days=800)
+    dates = pd.bdate_range(start_dt, end_dt)
+    session = requests.Session()
+
+    daily_frames = []
+    total = len(dates)
+    for i, dt in enumerate(dates, 1):
+        bas_dd = dt.strftime("%Y%m%d")
+        try:
+            raw = _fetch_daily(session, auth_key, bas_dd, market)
+        except Exception:
+            continue
+        if raw is None or raw.empty:
+            continue
+
+        code_col = next((c for c in ["ISU_SRT_CD", "ISU_CD", "Code", "Symbol"] if c in raw.columns), None)
+        name_col = next((c for c in ["ISU_ABBRV", "ISU_NM", "Name"] if c in raw.columns), None)
+        close_col = next((c for c in ["TDD_CLSPRC", "Close", "close"] if c in raw.columns), None)
+
+        if code_col is None or close_col is None:
+            continue
+
+        df = raw.copy()
+        df["date"] = bas_dd
+        df["code"] = df[code_col].astype(str).str.extract(r"(\d+)")[0].str.zfill(6)
+        df["name"] = df[name_col].astype(str) if name_col else ""
+        df["close"] = pd.to_numeric(df[close_col], errors="coerce")
+        df = df.dropna(subset=["code", "close"])
+        df = df[_is_common_stock_krx(df)].copy()
+        if not df.empty:
+            daily_frames.append(df[["date", "code", "name", "close"]])
+
         if prog:
-            done = min(batch_i + batch_size, total)
-            prog.progress(done / total, text=f"종목 수집 중… {done}/{total}")
+            prog.progress(i / total, text=f"NH-NL 계산용 KRX 수집 중… {bas_dd} ({i}/{total})")
 
-    if not all_closes:
-        return pd.DataFrame()
+    if not daily_frames:
+        raise RuntimeError("NH-NL 계산용 KRX 일별 종목 데이터가 없습니다.")
 
-    price_df = pd.concat(all_closes.values(), axis=1).sort_index()
+    panel = pd.concat(daily_frames, ignore_index=True)
+    panel["dt"] = pd.to_datetime(panel["date"], format="%Y%m%d")
+    panel = panel.sort_values(["code", "dt"]).drop_duplicates(["code", "dt"], keep="last")
 
-    # 3) 매 거래일: 260거래일 롤링 신고가/신저가 종목 수
-    records = []
-    dates = price_df.index
-    n_dates = len(dates)
-    for idx in range(260, n_dates):
-        dt     = dates[idx]
-        window = price_df.iloc[idx - 260: idx]
-        today  = price_df.iloc[idx]
-        w_high = window.max()
-        w_low  = window.min()
-        nh = int((today >= w_high).sum())
-        nl = int((today <= w_low).sum())
-        records.append({"date": dt.strftime("%Y%m%d"), "new_highs": nh, "new_lows": nl, "nhnl": nh - nl})
+    # 종목별 거래일 수 기준으로 너무 짧은 히스토리는 제외
+    valid_counts = panel.groupby("code")["dt"].size()
+    valid_codes = valid_counts[valid_counts >= 260].index
+    panel = panel[panel["code"].isin(valid_codes)].copy()
+    if panel.empty:
+        raise RuntimeError("52주 판정에 필요한 히스토리를 가진 종목이 없습니다.")
 
-    daily = pd.DataFrame(records)
-    if daily.empty:
-        return daily
+    def _mark_breakouts(g: pd.DataFrame) -> pd.DataFrame:
+        g = g.sort_values("dt").copy()
+        prev_high = g["close"].rolling(252, min_periods=252).max().shift(1)
+        prev_low = g["close"].rolling(252, min_periods=252).min().shift(1)
+        g["new_high"] = ((g["close"] > prev_high) & prev_high.notna()).astype(int)
+        g["new_low"] = ((g["close"] < prev_low) & prev_low.notna()).astype(int)
+        return g[["dt", "new_high", "new_low"]]
 
-    # 4) 주봉(금요일) 집계
-    daily["dt"] = pd.to_datetime(daily["date"], format="%Y%m%d")
-    daily = daily.set_index("dt")
-    weekly = daily[["new_highs", "new_lows", "nhnl"]].resample("W-FRI").sum()
-    weekly = weekly[weekly["new_highs"] > 0].reset_index()
+    marked = panel.groupby("code", group_keys=False).apply(_mark_breakouts).reset_index(drop=True)
+    daily = marked.groupby("dt", as_index=False)[["new_high", "new_low"]].sum()
+    daily["nhnl"] = daily["new_high"] - daily["new_low"]
+
+    weekly = daily.set_index("dt").resample("W-FRI").sum().reset_index()
+    weekly = weekly.rename(columns={"new_high": "new_highs", "new_low": "new_lows"})
     weekly["date"] = weekly["dt"].dt.strftime("%Y%m%d")
+    weekly = weekly[["date", "dt", "new_highs", "new_lows", "nhnl"]]
+    weekly = weekly.sort_values("dt").reset_index(drop=True)
+    cutoff_dt = start_dt + pd.Timedelta(days=365)
+    weekly = weekly[weekly["dt"] >= cutoff_dt].reset_index(drop=True)
+    if chart_start_date:
+        chart_start_dt = pd.to_datetime(chart_start_date, format="%Y%m%d")
+        weekly = weekly[weekly["dt"] >= chart_start_dt].reset_index(drop=True)
+
+    # 너무 앞쪽 워밍업 구간 제거
+    cutoff = pd.to_datetime(start_dt) + pd.Timedelta(days=365)
+    weekly = weekly[weekly["dt"] >= cutoff].reset_index(drop=True)
     return weekly
 
 
-# 하위 호환: FDR 버전도 남겨두되 pykrx 버전을 기본으로 사용
-def compute_nhnl_fdr(market: str, end_date: str, prog=None) -> pd.DataFrame:
-    """pykrx 버전으로 리다이렉트 (FDR 루프는 너무 느려서 대체)"""
-    return compute_nhnl_pykrx(market, end_date, prog)
-
+def compute_nhnl_fdr(market: str, end_date: str, prog=None, auth_key: str = "") -> pd.DataFrame:
+    return compute_nhnl_pykrx(market=market, end_date=end_date, prog=prog, auth_key=auth_key)
 # ──────────────────────────────────────────────────────────────
 # 파일 캐시 유틸
 # ──────────────────────────────────────────────────────────────
@@ -306,6 +352,38 @@ def load_from_github(market: str) -> pd.DataFrame:
     df = breadth.merge(idx[["date","open","high","low","close"]], on="date", how="inner")
     df = df.sort_values("date").reset_index(drop=True)
     return df
+
+
+@st.cache_data(show_spinner=False, ttl=1800)
+def load_nhnl_from_github(market: str) -> pd.DataFrame | None:
+    import requests as _req
+    url = GITHUB_NHNL[market]
+    resp = _req.get(url, timeout=15)
+    if resp.status_code != 200:
+        return None
+    df = pd.read_csv(io.StringIO(resp.text), dtype={"date": str})
+    if df.empty:
+        return None
+
+    # 컬럼 이름 정규화
+    rename_map = {}
+    if "new_high" in df.columns and "new_highs" not in df.columns:
+        rename_map["new_high"] = "new_highs"
+    if "new_low" in df.columns and "new_lows" not in df.columns:
+        rename_map["new_low"] = "new_lows"
+    if rename_map:
+        df = df.rename(columns=rename_map)
+
+    required = {"date", "nhnl"}
+    if not required.issubset(df.columns):
+        raise RuntimeError(f"GitHub NH-NL CSV 컬럼 부족: {list(df.columns)}")
+
+    if "new_highs" not in df.columns:
+        df["new_highs"] = 0
+    if "new_lows" not in df.columns:
+        df["new_lows"] = 0
+
+    return df.sort_values("date").reset_index(drop=True)
 
 # ──────────────────────────────────────────────────────────────
 # 지수 OHLC
@@ -484,6 +562,20 @@ def make_plotly_chart(df: pd.DataFrame, market: str, sig: dict,
     lb_color = "rgba(38,210,160,0.95)" if hlab["bull_div"] else "rgba(160,160,160,0.8)"
     la_color = "rgba(38,210,160,0.6)"  if hlab["bull_div"] else "rgba(120,120,120,0.5)"
 
+    # y축 여백 강제 확보: 신고가 근처에서도 캔들이 천장에 붙지 않게 함
+    price_low  = float(pf["low"].min())
+    price_high = float(pf["high"].max())
+    price_span = max(price_high - price_low, abs(price_high) * 0.02, 1.0)
+    price_pad_top = price_span * 0.45
+    price_pad_bot = price_span * 0.08
+    y1_range = [price_low - price_pad_bot, price_high + price_pad_top]
+
+    ad_min = float(pf["ad_line"].min())
+    ad_max = float(pf["ad_line"].max())
+    ad_span = max(ad_max - ad_min, max(abs(ad_max), 1.0) * 0.02, 1.0)
+    ad_pad = ad_span * 0.10
+    y2_range = [ad_min - ad_pad, ad_max + ad_pad]
+
     if hlab["bear_div"]:
         div_text, div_color = f"⚠ 부정적 불일치 {hlab['bear_div_pct']:.1f}%", "#ff5050"
     elif hlab["bull_div"]:
@@ -577,7 +669,7 @@ def make_plotly_chart(df: pd.DataFrame, market: str, sig: dict,
         hovermode="x unified",
         hoverlabel=dict(bgcolor="#1e1e2e", font_color="#ffffff", font_size=12, bordercolor="#555"),
         legend=dict(orientation="h", y=1.01, x=0),
-        margin=dict(l=10, r=90, t=45, b=10),
+        margin=dict(l=10, r=90, t=55, b=10),
         xaxis=dict(
             rangeslider=dict(visible=False),
             showspikes=True, spikemode="across", spikesnap="cursor",
@@ -587,14 +679,18 @@ def make_plotly_chart(df: pd.DataFrame, market: str, sig: dict,
             domain=[0, 1],
         ),
         yaxis=dict(
-            title="지수", domain=[0.52, 1.0],
-            showspikes=True, spikethickness=1, spikecolor="rgba(200,200,200,0.4)",
+            title="지수", domain=[0.52, 1.0], range=y1_range,
+            showspikes=True, spikemode="across", spikesnap="hovered data",
+            spikethickness=1, spikecolor="rgba(200,200,200,0.35)", spikedash="dot",
         ),
         yaxis2=dict(
-            title="A/D Line", domain=[0.0, 0.48],
-            showspikes=True, spikethickness=1, spikecolor="rgba(200,200,200,0.4)",
+            title="A/D Line", domain=[0.0, 0.48], range=y2_range,
+            showspikes=True, spikemode="across", spikesnap="hovered data",
+            spikethickness=1, spikecolor="rgba(200,200,200,0.55)", spikedash="dot",
         ),
     )
+        # 참고: Plotly 기본 기능상 위 패널 hover만으로 아래 A/D의 대응 y값 가로선까지 자동 표시는 어렵다.
+    # 대신 아래 A/D 패널 hover 시 가로 점선 crosshair가 보이도록 설정했다.
     return fig
 
 # ──────────────────────────────────────────────────────────────
@@ -630,7 +726,7 @@ def main():
             start_dt = today - timedelta(days=730)
             end_dt   = today
 
-        fetch_btn = st.button("🔄 데이터 불러오기", type="primary", use_container_width=True)
+        fetch_btn = st.button("🔄 데이터 불러오기", type="primary", width='stretch')
         if mode == "🔑 KRX API (직접 수집)":
             st.caption("💡 새로 불러오고 싶으면 아래 캐시를 지우고 불러오세요.")
 
@@ -665,11 +761,16 @@ def main():
         return
 
     if fetch_btn:
+        st.session_state.pop(f"nhnl_{market}", None)
         if mode == "☁️ GitHub (빠름)":
             try:
                 with st.spinner("GitHub에서 CSV 읽는 중…"):
                     df = load_from_github(market)
+                    nhnl_df = load_nhnl_from_github(market)
                 st.success(f"✅ GitHub 로드 완료 — {len(df)}일치 / 최신: {df['date'].iloc[-1]}")
+                st.session_state[f"nhnl_{market}"] = nhnl_df if nhnl_df is not None and not nhnl_df.empty else None
+                if nhnl_df is None or nhnl_df.empty:
+                    st.info("NH-NL은 왼쪽에서 '🔑 KRX API (직접 수집)'를 선택한 뒤, '데이터 불러오기'를 누르면 함께 로드됩니다.")
             except Exception as e:
                 st.error(f"GitHub 로드 실패: {e}")
                 return
@@ -680,11 +781,12 @@ def main():
             start_str = start_dt.strftime("%Y%m%d")
             end_str   = end_dt.strftime("%Y%m%d")
             cached = load_cache(market, start_str, end_str, 50000.0)
-            if cached is not None:
-                st.success(f"✅ 캐시에서 로드 ({market} {start_str}~{end_str})")
-                df = cached
-            else:
-                try:
+            nhnl_cached = load_nhnl_cache(market, end_str)
+            try:
+                if cached is not None:
+                    st.success(f"✅ 캐시에서 로드 ({market} {start_str}~{end_str})")
+                    df = cached
+                else:
                     with st.spinner("지수 OHLC 수집 중…"):
                         index_df = fetch_index_ohlc(market, start_str, end_str)
                     breadth_df = build_breadth(auth_key, start_str, end_str, market, 50000.0)
@@ -693,10 +795,28 @@ def main():
                         on="date", how="inner"
                     ).sort_values("date").reset_index(drop=True)
                     save_cache(df, market, start_str, end_str, 50000.0)
-                    st.success(f"✅ 수집 완료 — {len(df)}일치")
-                except Exception as e:
-                    st.error(f"데이터 수집 실패: {e}")
-                    return
+                    st.success(f"✅ A/D 데이터 수집 완료 — {len(df)}일치")
+
+                if nhnl_cached is not None and not nhnl_cached.empty:
+                    nhnl_df = nhnl_cached
+                    st.success(f"✅ NH-NL 캐시 로드 — {len(nhnl_df)}주치")
+                else:
+                    prog3 = st.progress(0, text="NH-NL 계산용 KRX 수집 중…")
+                    nhnl_df = compute_nhnl_pykrx(
+                        market,
+                        end_str,
+                        prog=prog3,
+                        auth_key=auth_key,
+                        chart_start_date=start_str,
+                    )
+                    prog3.empty()
+                    if nhnl_df is not None and not nhnl_df.empty:
+                        save_nhnl_cache(nhnl_df, market, end_str)
+                        st.success(f"✅ NH-NL 계산 완료 — {len(nhnl_df)}주치")
+                st.session_state[f"nhnl_{market}"] = nhnl_df if nhnl_df is not None and not nhnl_df.empty else None
+            except Exception as e:
+                st.error(f"데이터 수집 실패: {type(e).__name__}: {e}")
+                return
 
         st.session_state["df_merged"] = df
         st.session_state["df_market"] = market
@@ -719,12 +839,37 @@ def main():
     last = df.iloc[-1]
 
     # ── 탭 구성 ──
-    tab1, tab2, tab3 = st.tabs(["📈 A/D Line", "⚡ 모멘텀", "🏔 NH-NL"])
+    # st.tabs 는 서버측에서 active tab을 제어/유지할 수 없어서
+    # 버튼 클릭 시 rerun 되면 첫 탭으로 돌아가 보일 수 있음.
+    TAB_LABELS = ["📈 A/D Line", "⚡ 모멘텀", "🏔 NH-NL"]
+    current_tab = st.session_state.get("active_tab", TAB_LABELS[0])
+    if current_tab not in TAB_LABELS:
+        current_tab = TAB_LABELS[0]
+        st.session_state["active_tab"] = current_tab
+
+    _default_idx = TAB_LABELS.index(current_tab)
+    if hasattr(st, "segmented_control"):
+        active_tab = st.segmented_control(
+            "분석 탭",
+            TAB_LABELS,
+            selection_mode="single",
+            default=TAB_LABELS[_default_idx],
+            key="active_tab_selector",
+        )
+    else:
+        active_tab = st.radio(
+            "분석 탭",
+            TAB_LABELS,
+            index=_default_idx,
+            horizontal=True,
+            key="active_tab_selector",
+        )
+    st.session_state["active_tab"] = active_tab
 
     # ══════════════════════════════════════════════
     # TAB 1: 기존 A/D Line 분석
     # ══════════════════════════════════════════════
-    with tab1:
+    if active_tab == "📈 A/D Line":
         gap_color = "#00897b" if sig["gap"] >= 0 else "#c62828"
         gap_arrow = "▲" if sig["gap"] >= 0 else "▼"
         st.markdown(
@@ -755,7 +900,7 @@ def main():
         )
         try:
             fig_main = make_plotly_chart(df, market, sig, chart_months, hlab)
-            st.plotly_chart(fig_main, use_container_width=True)
+            st.plotly_chart(fig_main, width='stretch')
         except Exception as e:
             st.error(f"차트 렌더링 실패: {e}")
 
@@ -766,7 +911,7 @@ def main():
                       "ad_diff","ad_line","close","breadth_thrust_ema10"] if c in show.columns]
             st.dataframe(
                 show[cols].sort_values("date", ascending=False).reset_index(drop=True),
-                use_container_width=True,
+                width='stretch',
             )
             csv = show.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig")
             st.download_button("📥 CSV 다운로드", csv,
@@ -775,7 +920,7 @@ def main():
     # ══════════════════════════════════════════════
     # TAB 2: MI 탄력지수 (스탠 와인스태인 책 정의)
     # ══════════════════════════════════════════════
-    with tab2:
+    elif active_tab == "⚡ 모멘텀":
         st.subheader("⚡ MI 탄력지수 (Momentum Index)")
         st.caption(
             "스탠 와인스태인 책 정의: 등락종목수 차이(AD)의 200일 롤링 평균. "
@@ -832,7 +977,7 @@ def main():
             legend=dict(orientation="h", y=1.05),
             yaxis_title="MI 값 (AD 평균)"
         )
-        st.plotly_chart(fig_mi, use_container_width=True)
+        st.plotly_chart(fig_mi, width='stretch')
 
         if len(df) < mi_window:
             st.warning(f"⚠️ 데이터 {len(df)}일 — {mi_window}일 MA 계산에 데이터가 부족합니다. "
@@ -841,134 +986,122 @@ def main():
     # ══════════════════════════════════════════════
     # TAB 3: NH-NL
     # ══════════════════════════════════════════════
-    with tab3:
+    elif active_tab == "🏔 NH-NL":
         st.subheader("🏔 고점-저점 수치 (신고가 - 신저가 종목 수)")
         st.caption(
             "스탠 와인스태인 책 정의: 매주 신고가 기록 종목 수 - 신저가 기록 종목 수. "
-            "FDR로 전체 종목 1년치 종가 수집 → 52주 신고가/신저가 판별 → 주봉 집계."
+            "KRX API 일별 전체 종목 스냅샷으로 52주 신고가/신저가를 판별해 주간 집계합니다."
         )
 
-        if not FDR_OK:
-            st.error("finance-datareader 미설치: pip install finance-datareader")
-        else:
-            end_date_str = df["date"].iloc[-1]
-            cached_nhnl  = load_nhnl_cache(market, end_date_str)
-
-            if cached_nhnl is not None and not cached_nhnl.empty:
-                nhnl_df = cached_nhnl
-                st.success(f"✅ NH-NL 캐시 로드 — {len(nhnl_df)}주치")
+        nhnl_df = st.session_state.get(f"nhnl_{market}")
+        if nhnl_df is None or nhnl_df.empty:
+            if mode == "☁️ GitHub (빠름)":
+                st.info("NH-NL은 왼쪽에서 '🔑 KRX API (직접 수집)'를 선택한 뒤, '데이터 불러오기'를 누르면 함께 로드됩니다.")
             else:
-                if st.button("📥 NH-NL 계산 (pykrx 사용, 수분 소요)", key="nhnl_btn"):
-                    prog3 = st.progress(0, text="전체 종목 수집 중…")
-                    try:
-                        nhnl_df = compute_nhnl_pykrx(market, end_date_str, prog=prog3)
-                        prog3.empty()
-                        if nhnl_df.empty:
-                            st.error("NH-NL 데이터 수집 실패")
-                            nhnl_df = None
-                        else:
-                            save_nhnl_cache(nhnl_df, market, end_date_str)
-                            st.session_state[f"nhnl_{market}"] = nhnl_df
-                            st.success(f"✅ NH-NL 계산 완료 — {len(nhnl_df)}주치")
-                    except Exception as e:
-                        prog3.empty()
-                        st.error(f"NH-NL 수집 오류: {e}")
-                        nhnl_df = None
-                else:
-                    nhnl_df = st.session_state.get(f"nhnl_{market}")
-                    if nhnl_df is None:
-                        st.info("👆 버튼을 눌러 전종목 데이터를 수집하세요. (첫 실행만 수분 소요, 이후 캐시 사용)")
+                st.info("KRX 직접 수집 모드에서는 '데이터 불러오기'를 누를 때 NH-NL도 함께 계산합니다.")
+        if nhnl_df is not None and not nhnl_df.empty:
+            from plotly.subplots import make_subplots as _msp2
+            nhnl_df["dt"] = pd.to_datetime(nhnl_df["date"].astype(str), format="%Y%m%d")
+            end_dt3   = nhnl_df["dt"].max()
+            start_dt3 = end_dt3 - pd.DateOffset(months=chart_months)
+            pf3       = nhnl_df[nhnl_df["dt"] >= start_dt3].copy().reset_index(drop=True)
 
-            if nhnl_df is not None and not nhnl_df.empty:
-                from plotly.subplots import make_subplots as _msp2
-                nhnl_df["dt"] = pd.to_datetime(nhnl_df["date"].astype(str), format="%Y%m%d")
-                end_dt3   = nhnl_df["dt"].max()
-                start_dt3 = end_dt3 - pd.DateOffset(months=chart_months)
-                pf3       = nhnl_df[nhnl_df["dt"] >= start_dt3].copy().reset_index(drop=True)
+            # 4주 MA 전체 기준 계산
+            ns_all   = pd.Series(nhnl_df["nhnl"].values.astype(float))
+            nma_all  = ns_all.rolling(4).mean()
+            nma_plot = nma_all.iloc[(nhnl_df["dt"] >= start_dt3).values].reset_index(drop=True)
 
-                # 4주 MA 전체 기준 계산
-                ns_all   = pd.Series(nhnl_df["nhnl"].values.astype(float))
-                nma_all  = ns_all.rolling(4).mean()
-                nma_plot = nma_all.iloc[(nhnl_df["dt"] >= start_dt3).values].reset_index(drop=True)
+            last_nhnl = int(ns_all.iloc[-1])
+            last_nh   = int(nhnl_df["new_highs"].iloc[-1])
+            last_nl   = int(nhnl_df["new_lows"].iloc[-1])
 
-                last_nhnl = int(ns_all.iloc[-1])
-                last_nh   = int(nhnl_df["new_highs"].iloc[-1])
-                last_nl   = int(nhnl_df["new_lows"].iloc[-1])
+            # 판정: 4주 MA 기울기
+            lma = nma_all.iloc[-1]; pma = nma_all.iloc[-2] if len(nma_all) >= 2 else lma
+            nhnl_ma_vals = nma_all.dropna()
+            slope = np.polyfit(np.arange(len(nhnl_ma_vals)), nhnl_ma_vals.values, 1)[0] if len(nhnl_ma_vals) >= 2 else 0.0
+            if pd.isna(lma):            nhnl_verdict, trend_color = "⚪ 데이터 부족",   "#757575"
+            elif lma > 0 and lma > pma: nhnl_verdict, trend_color = "🟢 강세 상승",     "#2e7d32"
+            elif lma > 0:               nhnl_verdict, trend_color = "🟡 강세 둔화",     "#f9a825"
+            elif lma < 0 and lma < pma: nhnl_verdict, trend_color = "🔴 약세 하락",     "#c62828"
+            else:                       nhnl_verdict, trend_color = "🟠 약세 회복 중",   "#ef6c00"
 
-                # 판정: 4주 MA 기울기
-                lma = nma_all.iloc[-1]; pma = nma_all.iloc[-2] if len(nma_all) >= 2 else lma
-                nhnl_ma_vals = nma_all.dropna()
-                slope = np.polyfit(np.arange(len(nhnl_ma_vals)), nhnl_ma_vals.values, 1)[0] if len(nhnl_ma_vals) >= 2 else 0.0
-                if pd.isna(lma):            nhnl_verdict, trend_color = "⚪ 데이터 부족",   "#757575"
-                elif lma > 0 and lma > pma: nhnl_verdict, trend_color = "🟢 강세 상승",     "#2e7d32"
-                elif lma > 0:               nhnl_verdict, trend_color = "🟡 강세 둔화",     "#f9a825"
-                elif lma < 0 and lma < pma: nhnl_verdict, trend_color = "🔴 약세 하락",     "#c62828"
-                else:                       nhnl_verdict, trend_color = "🟠 약세 회복 중",   "#ef6c00"
+            h1, h2, h3, h4, h5 = st.columns(5)
+            h1.metric("신고가 종목 수", f"{last_nh:,}")
+            h2.metric("신저가 종목 수", f"{last_nl:,}")
+            h3.metric("NH-NL",          f"{last_nhnl:+,}")
+            h4.metric("4주 MA 기울기",  f"{slope:+.1f}/주")
+            h5.metric("판정",            nhnl_verdict)
 
-                h1, h2, h3, h4, h5 = st.columns(5)
-                h1.metric("신고가 종목 수", f"{last_nh:,}")
-                h2.metric("신저가 종목 수", f"{last_nl:,}")
-                h3.metric("NH-NL",          f"{last_nhnl:+,}")
-                h4.metric("4주 MA 기울기",  f"{slope:+.1f}/주")
-                h5.metric("판정",            nhnl_verdict)
+            # 지수도 주간(FRI)으로 맞춰서 NH-NL과 같은 시간축으로 그림
+            pf_idx3 = df.copy()
+            pf_idx3["dt"] = pd.to_datetime(pf_idx3["date"].astype(str), format="%Y%m%d")
+            pf_idx3 = pf_idx3[["dt", "close"]].sort_values("dt").set_index("dt")
+            pf_idx3 = pf_idx3.resample("W-FRI").last().dropna().reset_index()
+            pf_idx3 = pf_idx3[pf_idx3["dt"] >= start_dt3].copy().reset_index(drop=True)
 
-                # 지수 같은 기간
-                pf_idx3 = df[pd.to_datetime(df["date"].astype(str), format="%Y%m%d") >= start_dt3].copy()
-                pf_idx3["dt"] = pd.to_datetime(pf_idx3["date"].astype(str), format="%Y%m%d")
+            pf3 = pf3.sort_values("dt").reset_index(drop=True)
 
-                # 2패널 — 위: 지수 곡선 / 아래: NH-NL 곡선 + MA
-                fig_hl = _msp2(rows=2, cols=1, shared_xaxes=True,
-                               row_heights=[0.5, 0.5], vertical_spacing=0.02)
+            # 2패널 — 위: 주간 지수 / 아래: 주간 NH-NL
+            fig_hl = _msp2(rows=2, cols=1, shared_xaxes=True,
+                           row_heights=[0.5, 0.5], vertical_spacing=0.03)
 
-                # 위 패널: 지수 곡선 단독
-                fig_hl.add_trace(go.Scatter(
-                    x=pf_idx3["dt"], y=pf_idx3["close"],
-                    line=dict(color="rgba(200,200,200,0.9)", width=1.8),
-                    name=f"{market} 지수",
-                ), row=1, col=1)
+            # 위 패널: 지수(주간)
+            fig_hl.add_trace(go.Scatter(
+                x=pf_idx3["dt"], y=pf_idx3["close"].astype(float),
+                line=dict(color="rgba(220,220,220,0.95)", width=1.8),
+                name=f"{market} 지수",
+            ), row=1, col=1)
 
-                # 아래 패널: NH-NL 곡선
-                fig_hl.add_trace(go.Scatter(
-                    x=pf3["dt"], y=pf3["nhnl"].astype(float),
-                    line=dict(color="#26a69a", width=1.8),
-                    name="NH-NL",
-                ), row=2, col=1)
+            # 아래 패널: NH-NL
+            fig_hl.add_trace(go.Scatter(
+                x=pf3["dt"], y=pf3["nhnl"].astype(float),
+                line=dict(color="#26a69a", width=2.0),
+                name="NH-NL",
+            ), row=2, col=1)
 
-                # 아래 패널: 4주 MA 곡선
-                fig_hl.add_trace(go.Scatter(
-                    x=pf3["dt"], y=nma_plot,
-                    line=dict(color="orange", width=2),
-                    name="4주 MA",
-                ), row=2, col=1)
+            # 아래 패널: 기준선 0
+            fig_hl.add_hline(
+                y=0, line_color="rgba(180,180,180,0.7)", line_dash="dot",
+                row=2, col=1
+            )
 
-                # 0선 (아래 패널)
-                fig_hl.add_hline(y=0, line_color="rgba(150,150,150,0.5)", line_dash="dot", row=2, col=1)
+            # 아래 패널: 4주 MA (임시 유지)
+            fig_hl.add_trace(go.Scatter(
+                x=pf3["dt"], y=nma_plot,
+                line=dict(color="orange", width=1.8),
+                name="4주 MA",
+            ), row=2, col=1)
 
-                fig_hl.update_layout(
-                    template="plotly_dark", height=560,
-                    title=dict(text=f"{market} NH-NL — {nhnl_verdict}  (4주MA 기울기 {slope:+.1f}/주)",
-                               font=dict(size=13, color=trend_color)),
-                    hovermode="x unified",
-                    hoverlabel=dict(bgcolor="#1e1e2e", font_color="white",
-                                   font_size=12, bordercolor="#444"),
-                    margin=dict(l=10, r=60, t=45, b=10),
-                    xaxis_rangeslider_visible=False,
-                    legend=dict(orientation="h", y=1.01),
-                    yaxis =dict(title="지수"),
-                    yaxis2=dict(title="NH-NL", zeroline=True,
-                                zerolinecolor="rgba(150,150,150,0.4)"),
-                )
-                # 세로선: 두 패널 동시 관통
-                fig_hl.update_traces(xaxis="x")
-                fig_hl.update_xaxes(
-                    showspikes=True, spikemode="across", spikesnap="cursor",
-                    spikethickness=1, spikecolor="rgba(200,200,200,0.7)", spikedash="solid",
-                    tickformat="%Y/%m/%d", dtick=7*24*60*60*1000,
-                    tickangle=-45, tickfont=dict(size=8),
-                )
-                fig_hl.update_yaxes(showspikes=True, spikethickness=1,
-                                    spikecolor="rgba(200,200,200,0.4)")
-                st.plotly_chart(fig_hl, use_container_width=True)
+            # 0선 (아래 패널)
+            fig_hl.add_hline(y=0, line_color="rgba(150,150,150,0.5)", line_dash="dot", row=2, col=1)
+
+            fig_hl.update_layout(
+                xaxis=dict(type="date"),
+                xaxis2=dict(type="date"),
+                template="plotly_dark", height=560,
+                title=dict(text=f"{market} NH-NL — {nhnl_verdict}  (4주MA 기울기 {slope:+.1f}/주)",
+                           font=dict(size=13, color=trend_color)),
+                hovermode="x unified",
+                hoverlabel=dict(bgcolor="#1e1e2e", font_color="white",
+                               font_size=12, bordercolor="#444"),
+                margin=dict(l=10, r=60, t=45, b=10),
+                xaxis_rangeslider_visible=False,
+                legend=dict(orientation="h", y=1.01),
+                yaxis =dict(title="지수"),
+                yaxis2=dict(title="NH-NL", zeroline=True,
+                            zerolinecolor="rgba(150,150,150,0.4)"),
+            )
+            # 세로선: 두 패널 동시 관통
+            fig_hl.update_traces(xaxis="x")
+            fig_hl.update_xaxes(
+                showspikes=True, spikemode="across", spikesnap="cursor",
+                spikethickness=1, spikecolor="rgba(200,200,200,0.7)", spikedash="solid",
+                tickformat="%Y/%m/%d", dtick=7*24*60*60*1000,
+                tickangle=-45, tickfont=dict(size=8),
+            )
+            fig_hl.update_yaxes(showspikes=True, spikethickness=1,
+                                spikecolor="rgba(200,200,200,0.4)")
+            st.plotly_chart(fig_hl, width='stretch')
 
 if __name__ == "__main__":
     main()

@@ -82,7 +82,7 @@ MARKET_CFG = {
         "get_tickers": get_sp500_tickers,   # S&P500 = NYSE 대표 지수
         "idx_sym":     "^GSPC",             # S&P500 지수
         "cmp_sym":     "SPY",               # 비교용 ETF
-        "label":       "NYSE (S&P500)",
+        "label":       "NYSE (S&P500 기준, 500종목)",
         "yf_pd_sym":   "SPY",
         "div_fallback": 0.015,
     },
@@ -145,26 +145,48 @@ def _yf_ticker_history(sym: str, start: str, end: str) -> pd.Series:
 @st.cache_data(show_spinner=False, ttl=3600)
 def fetch_breadth(market: str, start: str, end: str, base: float = 50000.0) -> pd.DataFrame:
     """
-    S&P500(NYSE) / NASDAQ100 구성종목 일별 등락으로 AD Line 계산.
-    advances = 전일 대비 상승 종목 수, declines = 하락 종목 수.
+    NYSE / NASDAQ 전체 등락 데이터 수집.
+    Yahoo Finance 심볼:
+      C:ISSU = NYSE Advance/Decline/Unchanged  (전체 NYSE 종목)
+      C:ISSQ = NASDAQ Advance/Decline/Unchanged (전체 NASDAQ 종목)
+    Close  = 상승 종목 수
+    Open   = 하락 종목 수  (Yahoo Finance 구조)
+    트레이딩뷰 $ADD / $NAAD 와 동일한 거래소 전체 기준.
     """
     if not YF_OK:
         raise RuntimeError("yfinance 미설치")
-    cfg     = MARKET_CFG[market]
-    tickers = cfg["get_tickers"]()
 
-    close_df = _yf_download(tickers, start, end)
-    # 전일 대비 등락
-    ret = close_df.pct_change()
-    advances = (ret > 0).sum(axis=1)
-    declines = (ret < 0).sum(axis=1)
-    ad_diff  = (advances - declines).astype(float)
+    AD_SYMS = {"NYSE": "C:ISSU", "NASDAQ": "C:ISSQ"}
+    ad_sym = AD_SYMS[market]
+
+    s = pd.to_datetime(start, format="%Y%m%d").strftime("%Y-%m-%d")
+    e = (pd.to_datetime(end, format="%Y%m%d") + timedelta(days=1)).strftime("%Y-%m-%d")
+
+    raw = yf.Ticker(ad_sym).history(start=s, end=e, auto_adjust=False)
+    if raw is None or raw.empty:
+        raise RuntimeError(
+            f"'{ad_sym}' 데이터 없음 — Yahoo Finance에서 해당 심볼을 지원하지 않습니다.\n"
+            f"브라우저에서 https://finance.yahoo.com/quote/{ad_sym} 접속해 확인하세요."
+        )
+    if hasattr(raw.index, "tz") and raw.index.tz is not None:
+        raw.index = raw.index.tz_localize(None)
+    else:
+        raw.index = pd.to_datetime(raw.index)
+    if isinstance(raw.columns, pd.MultiIndex):
+        raw.columns = raw.columns.get_level_values(0)
+
+    # Yahoo Finance C:ISSU 구조: Close=상승, Open=하락, Volume=보합
+    advances = pd.to_numeric(raw.get("Close", raw.iloc[:, 0]), errors="coerce").fillna(0)
+    declines = pd.to_numeric(raw.get("Open",  raw.iloc[:, 1]), errors="coerce").fillna(0)
+    ad_diff  = (advances - declines).sort_index()
+    advances = advances.reindex(ad_diff.index)
+    declines = declines.reindex(ad_diff.index)
 
     df = pd.DataFrame({
         "advances": advances.values,
         "declines": declines.values,
         "ad_diff":  ad_diff.values,
-    }, index=close_df.index)
+    }, index=ad_diff.index)
     df["ad_line"] = base + df["ad_diff"].cumsum()
     df["date"]    = df.index.strftime("%Y%m%d")
     return df.reset_index(drop=True)
@@ -197,33 +219,55 @@ def fetch_index(market: str, start: str, end: str) -> pd.DataFrame:
 
 @st.cache_data(show_spinner=False, ttl=3600)
 def fetch_nhnl(market: str, start: str, end: str) -> pd.DataFrame | None:
-    """52주 신고가/신저가: 구성종목 rolling 260일 고점/저점 대비 오늘 종가."""
+    """
+    52주 신고가/신저가: Yahoo Finance 전체 거래소 심볼 사용.
+    NYSE:   C:HISU (신고가) / C:LOSU (신저가)
+    NASDAQ: C:HISQ (신고가) / C:LOSQ (신저가)
+    트레이딩뷰 $NHNL / $NANAHNL 과 동일한 거래소 전체 기준.
+    """
     if not YF_OK:
         return None
-    cfg     = MARKET_CFG[market]
-    tickers = cfg["get_tickers"]()
-    # NH-NL 계산은 1년치 추가 데이터 필요
-    ext_start = (pd.to_datetime(start, format="%Y%m%d") - timedelta(days=400)).strftime("%Y%m%d")
+
+    NH_SYMS = {"NYSE": ("C:HISU", "C:LOSU"), "NASDAQ": ("C:HISQ", "C:LOSQ")}
+    hi_sym, lo_sym = NH_SYMS[market]
+
+    s = pd.to_datetime(start, format="%Y%m%d").strftime("%Y-%m-%d")
+    e = (pd.to_datetime(end,   format="%Y%m%d") + timedelta(days=1)).strftime("%Y-%m-%d")
+
+    errors = []
     try:
-        close_df = _yf_download(tickers, ext_start, end)
-        if close_df.empty:
-            return None
-        roll_high = close_df.rolling(260, min_periods=200).max()
-        roll_low  = close_df.rolling(260, min_periods=200).min()
-        new_highs = (close_df >= roll_high).sum(axis=1)
-        new_lows  = (close_df <= roll_low).sum(axis=1)
-        # 원래 start 이후만
-        start_dt = pd.to_datetime(start, format="%Y%m%d")
-        new_highs = new_highs[new_highs.index >= start_dt]
-        new_lows  = new_lows[new_lows.index  >= start_dt]
+        raw_hi = yf.Ticker(hi_sym).history(start=s, end=e, auto_adjust=False)
+        raw_lo = yf.Ticker(lo_sym).history(start=s, end=e, auto_adjust=False)
+        if raw_hi is None or raw_hi.empty:
+            errors.append(f"{hi_sym} 데이터 없음")
+        if raw_lo is None or raw_lo.empty:
+            errors.append(f"{lo_sym} 데이터 없음")
+        if errors:
+            raise RuntimeError(" / ".join(errors))
+
+        for r in [raw_hi, raw_lo]:
+            if hasattr(r.index, "tz") and r.index.tz is not None:
+                r.index = r.index.tz_localize(None)
+            else:
+                r.index = pd.to_datetime(r.index)
+            if isinstance(r.columns, pd.MultiIndex):
+                r.columns = r.columns.get_level_values(0)
+
+        new_highs = pd.to_numeric(raw_hi["Close"], errors="coerce").dropna().sort_index()
+        new_lows  = pd.to_numeric(raw_lo["Close"], errors="coerce").dropna().sort_index()
+
         df = pd.DataFrame({"new_highs": new_highs, "new_lows": new_lows}).dropna()
+        # 주봉으로 리샘플 (금요일 기준)
         weekly_hi = df["new_highs"].resample("W-FRI").last()
         weekly_lo = df["new_lows"].resample("W-FRI").last()
         weekly    = pd.DataFrame({"new_highs": weekly_hi, "new_lows": weekly_lo}).dropna()
         weekly["nhnl"] = weekly["new_highs"] - weekly["new_lows"]
         weekly["date"] = weekly.index.strftime("%Y%m%d")
         return weekly.reset_index(drop=True)
-    except Exception:
+    except Exception as e_:
+        # 세션 상태에 오류 저장해서 UI에 표시
+        import streamlit as _st
+        _st.session_state["nhnl_error"] = str(e_)
         return None
 
 @st.cache_data(show_spinner=False, ttl=86400)
@@ -468,8 +512,8 @@ def make_plotly_chart(df, market, sig, chart_months, hlab) -> go.Figure:
         template="plotly_dark", height=660,
         title=dict(text=f"{MARKET_CFG[market]['label']} — {div_text}",
                    font=dict(size=14, color=div_color)),
-        hovermode="x unified",
-        hoverlabel=dict(bgcolor="#1e1e2e", font_color="#ffffff", font_size=12, bordercolor="#555"),
+        hovermode="x",
+        hoverlabel=dict(bgcolor="#1a1a2e", font_color="#ffffff", font_size=12, bordercolor="#888888", namelength=-1),
         legend=dict(orientation="h", y=1.01, x=0),
         margin=dict(l=10, r=90, t=45, b=10),
         xaxis=dict(
@@ -612,12 +656,26 @@ def main():
             marker_color=[("#26a69a" if v >= 0 else "#ef5350") for v in mip.fillna(0)],
             name=f"MI ({mi_w}일)", opacity=0.85))
         fig_mi.add_hline(y=0, line_color="gray", line_dash="dot", annotation_text="기준선(0)")
-        fig_mi.update_layout(title=f"{market} MI 탄력지수", template="plotly_dark", height=420, yaxis_title="MI")
+        fig_mi.update_layout(title=f"{market} MI 탄력지수", template="plotly_dark", height=420, yaxis_title="MI",
+            hovermode="x",
+            hoverlabel=dict(bgcolor="#1a1a2e", font_color="#ffffff", font_size=12, bordercolor="#888888", namelength=-1))
         st.plotly_chart(fig_mi, use_container_width=True)
 
     with tab3:
         st.subheader("🏔 NH-NL (52주 신고가 - 신저가 종목 수)")
-        st.caption("구성종목 기준 260거래일 롤링 신고가/신저가 종목 수. 지수(좌축) + NH-NL곡선(우축) 겹쳐 표시.")
+        st.caption("NYSE/NASDAQ 전체 거래소 기준 52주 신고가/신저가 종목 수. 트레이딩뷰 $NHNL/$NANAHNL 동일 소스.")
+        if nhnl_df is None:
+            err = st.session_state.pop("nhnl_error", None)
+            if err:
+                st.warning(
+                    f"NH-NL 데이터 수집 실패: {err}\n\n"
+                    "Yahoo Finance가 해당 심볼을 지원하지 않을 수 있습니다. "
+                    "**데이터 불러오기** 버튼을 다시 눌러보세요."
+                )
+            else:
+                st.info("데이터 불러오기 버튼을 눌러주세요.")
+        elif nhnl_df.empty:
+            st.warning("NH-NL 데이터가 비어 있습니다.")
         if nhnl_df is not None and not nhnl_df.empty:
             from plotly.subplots import make_subplots as _msp
             end3  = pd.to_datetime(nhnl_df["date"].astype(str), format="%Y%m%d").max()
@@ -684,9 +742,9 @@ def main():
                 template="plotly_dark", height=560,
                 title=dict(text=f"{market} NH-NL — {nv}", font_size=13,
                            font=dict(color=nc)),
-                hovermode="x unified",
-                hoverlabel=dict(bgcolor="#1e1e2e", font_color="white",
-                                font_size=12, bordercolor="#444"),
+                hovermode="x",
+                hoverlabel=dict(bgcolor="#1a1a2e", font_color="#ffffff",
+                                font_size=12, bordercolor="#888888", namelength=-1),
                 margin=dict(l=10, r=60, t=45, b=10),
                 xaxis_rangeslider_visible=False,
                 legend=dict(orientation="h", y=1.01),
