@@ -377,8 +377,7 @@ def make_plotly_chart(df, market, sig, chart_months, hlab) -> go.Figure:
     la_color = "rgba(38,210,160,0.6)"  if hlab["bull_div"] else "rgba(120,120,120,0.5)"
 
     fig = make_subplots(rows=2, cols=1, shared_xaxes=True,
-                        row_heights=[0.52, 0.48], vertical_spacing=0.03,
-                        subplot_titles=(f"{MARKET_CFG[market]['label']}", "A/D Line (가격 겹침)"))
+                        row_heights=[0.52, 0.48], vertical_spacing=0.0)
 
     fig.add_trace(go.Candlestick(
         x=pf["dt"], open=pf["open"], high=pf["high"], low=pf["low"], close=pf["close"],
@@ -401,8 +400,9 @@ def make_plotly_chart(df, market, sig, chart_months, hlab) -> go.Figure:
         line=dict(color="#1e88e5", width=2.5), name="A/D Line",
     ), row=2, col=1)
 
-    ad_min = pf["ad_line"].min(); ad_max = pf["ad_line"].max()
-    pr_min = pf["close"].min();   pr_max = pf["close"].max()
+    # 가격 곡선 겹쳐 표시 (A/D 스케일 정규화) — 트레이딩뷰 방식
+    ad_min = pf["ad_line"].astype(float).min(); ad_max = pf["ad_line"].astype(float).max()
+    pr_min = pf["close"].min();                 pr_max = pf["close"].max()
     if pr_max != pr_min:
         price_mapped = ad_min + (pf["close"] - pr_min) / (pr_max - pr_min) * (ad_max - ad_min)
     else:
@@ -451,9 +451,10 @@ def make_plotly_chart(df, market, sig, chart_months, hlab) -> go.Figure:
         xaxis_rangeslider_visible=False,
         hovermode="x unified",
         legend=dict(orientation="h", y=1.01, x=0),
-        margin=dict(l=10, r=80, t=55, b=10),
+        margin=dict(l=10, r=80, t=45, b=10),
+        yaxis=dict(title="지수", title_font_size=10),
+        yaxis2=dict(title="A/D Line", title_font_size=10),
     )
-    # 호버 세로선 — 두 패널 동시 관통
     spike_cfg = dict(
         showspikes=True, spikemode="across", spikesnap="cursor",
         spikethickness=1, spikecolor="rgba(200,200,200,0.6)", spikedash="solid",
@@ -592,24 +593,89 @@ def main():
 
     with tab3:
         st.subheader("🏔 NH-NL (52주 신고가 - 신저가 종목 수)")
-        st.caption("구성종목 기준 260거래일 롤링 신고가/신저가 종목 수 (주봉).")
+        st.caption("구성종목 기준 260거래일 롤링 신고가/신저가 종목 수 (주봉). 판정은 10주 MA 기울기 기준.")
         if nhnl_df is not None and not nhnl_df.empty:
+            from plotly.subplots import make_subplots as _msp
             end3  = pd.to_datetime(nhnl_df["date"].astype(str), format="%Y%m%d").max()
             mask3 = pd.to_datetime(nhnl_df["date"].astype(str), format="%Y%m%d") >= end3 - pd.DateOffset(months=chart_months)
-            pf3   = nhnl_df[mask3].copy(); pf3["dt"] = pd.to_datetime(pf3["date"].astype(str), format="%Y%m%d")
-            ns    = pd.Series(nhnl_df["nhnl"].values.astype(float))
-            nma   = ns.rolling(10).mean().iloc[mask3.values].reset_index(drop=True)
-            ln    = int(ns.iloc[-1]); lh = int(nhnl_df["new_highs"].iloc[-1]); ll = int(nhnl_df["new_lows"].iloc[-1])
-            nv    = ("🟢 강세" if ln > 0 else "🔴 약세")
+            pf3   = nhnl_df[mask3].copy()
+            pf3["dt"] = pd.to_datetime(pf3["date"].astype(str), format="%Y%m%d")
+
+            # 10주 MA (전체 기준으로 계산 후 필터)
+            ns_all = pd.Series(nhnl_df["nhnl"].values.astype(float))
+            nma_all = ns_all.rolling(10).mean()
+            nma   = nma_all.iloc[mask3.values].reset_index(drop=True)
+
+            # 판정: 10주 MA 기울기
+            lma = nma_all.iloc[-1]; pma = nma_all.iloc[-2] if len(nma_all) >= 2 else lma
+            ln  = int(ns_all.iloc[-1])
+            lh  = int(nhnl_df["new_highs"].iloc[-1])
+            ll  = int(nhnl_df["new_lows"].iloc[-1])
+            if pd.isna(lma):
+                nv, nc = "⚪ 데이터 부족", "#757575"
+            elif lma > 0 and lma > pma:
+                nv, nc = "🟢 강세 상승", "#2e7d32"
+            elif lma > 0 and lma <= pma:
+                nv, nc = "🟡 강세 둔화", "#f9a825"
+            elif lma < 0 and lma < pma:
+                nv, nc = "🔴 약세 하락", "#c62828"
+            else:
+                nv, nc = "🟠 약세 회복 중", "#ef6c00"
+
             n1, n2, n3, n4 = st.columns(4)
-            n1.metric("신고가 종목", f"{lh}"); n2.metric("신저가 종목", f"{ll}")
-            n3.metric("NH-NL", f"{ln:+}");    n4.metric("판정", nv)
-            fig_n = go.Figure()
-            fig_n.add_trace(go.Bar(x=pf3["dt"], y=pf3["nhnl"],
-                marker_color=[("#26a69a" if v >= 0 else "#ef5350") for v in pf3["nhnl"]], name="NH-NL", opacity=0.8))
-            fig_n.add_trace(go.Scatter(x=pf3["dt"], y=nma, line=dict(color="orange", width=1.5), name="10주 MA"))
-            fig_n.add_hline(y=0, line_color="gray", line_dash="dot")
-            fig_n.update_layout(title=f"{market} NH-NL (주봉)", template="plotly_dark", height=420, yaxis_title="NH-NL")
+            n1.metric("신고가 종목", f"{lh}")
+            n2.metric("신저가 종목", f"{ll}")
+            n3.metric("NH-NL", f"{ln:+}")
+            n4.metric("판정", nv)
+
+            # 지수 데이터 같은 기간으로 맞춤
+            idx_mask = pd.to_datetime(df["date"].astype(str), format="%Y%m%d") >= end3 - pd.DateOffset(months=chart_months)
+            pf_idx = df[idx_mask].copy()
+            pf_idx["dt"] = pd.to_datetime(pf_idx["date"].astype(str), format="%Y%m%d")
+
+            fig_n = _msp(rows=2, cols=1, shared_xaxes=True,
+                         row_heights=[0.45, 0.55], vertical_spacing=0.0)
+
+            # 위 패널: 지수 캔들
+            fig_n.add_trace(go.Candlestick(
+                x=pf_idx["dt"],
+                open=pf_idx["open"], high=pf_idx["high"],
+                low=pf_idx["low"],   close=pf_idx["close"],
+                increasing_line_color="#26a69a", decreasing_line_color="#ef5350",
+                name=market, showlegend=False,
+            ), row=1, col=1)
+
+            # 아래 패널: NH-NL 막대 + 10주 MA
+            fig_n.add_trace(go.Bar(
+                x=pf3["dt"], y=pf3["nhnl"],
+                marker_color=[("#26a69a" if v >= 0 else "#ef5350") for v in pf3["nhnl"]],
+                name="NH-NL", opacity=0.8,
+            ), row=2, col=1)
+            fig_n.add_trace(go.Scatter(
+                x=pf3["dt"], y=nma,
+                line=dict(color="orange", width=1.8),
+                name="10주 MA",
+            ), row=2, col=1)
+            fig_n.add_hline(y=0, line_color="gray", line_dash="dot", row=2, col=1)
+
+            fig_n.update_layout(
+                template="plotly_dark", height=600,
+                title=dict(text=f"{market} NH-NL — {nv}", font_size=13),
+                hovermode="x unified",
+                margin=dict(l=10, r=10, t=45, b=10),
+                xaxis_rangeslider_visible=False,
+                yaxis=dict(title="지수", title_font_size=10),
+                yaxis2=dict(title="NH-NL", title_font_size=10),
+            )
+            spike_cfg = dict(
+                showspikes=True, spikemode="across", spikesnap="cursor",
+                spikethickness=1, spikecolor="rgba(200,200,200,0.6)", spikedash="solid",
+                tickformat="%m/%d", dtick=7*24*60*60*1000,
+                tickangle=-45, tickfont=dict(size=9),
+            )
+            fig_n.update_xaxes(**spike_cfg)
+            fig_n.update_layout(xaxis2=dict(matches="x", **spike_cfg))
+            fig_n.update_yaxes(showspikes=True, spikethickness=1, spikecolor="rgba(200,200,200,0.4)")
             st.plotly_chart(fig_n, use_container_width=True)
         else:
             st.warning("NH-NL 데이터를 가져오지 못했습니다.")
