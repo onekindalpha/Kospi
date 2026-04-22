@@ -23,7 +23,13 @@ if not AUTH_KEY:
 
 def fetch_krx_page(market: str, bas_dd: str) -> dict:
     url = API_BASE + ENDPOINTS[market]
-    r = requests.get(url, params={"AUTH_KEY": AUTH_KEY, "BAS_DD": bas_dd}, timeout=30)
+    headers = {
+        "AUTH_KEY": AUTH_KEY.strip(),
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "User-Agent": "Mozilla/5.0",
+    }
+    r = requests.post(url, headers=headers, json={"basDd": bas_dd}, timeout=30)
     r.raise_for_status()
     return r.json()
 
@@ -41,8 +47,18 @@ def collect_breadth(market: str, start_str: str, end_str: str,
                 data = fetch_krx_page(market, bas_dd)
                 items = data.get("OutBlock_1", [])
                 if items:
-                    adv = sum(1 for x in items if float(x.get("CMPPREVDD_PRC", 0) or 0) > 0)
-                    dec = sum(1 for x in items if float(x.get("CMPPREVDD_PRC", 0) or 0) < 0)
+                    def _val(x):
+                        # 대시보드와 동일 — PrevDiff 또는 FlucRate 필드
+                        for key in ("CMPPREVDD_PRC", "PrevDiff", "FLUC_RT", "FlucRate"):
+                            v = x.get(key)
+                            if v is not None:
+                                try:
+                                    return float(str(v).replace(",", ""))
+                                except Exception:
+                                    pass
+                        return 0.0
+                    adv = sum(1 for x in items if _val(x) > 0)
+                    dec = sum(1 for x in items if _val(x) < 0)
                     unc = len(items) - adv - dec
                     rows.append({"date": int(bas_dd), "advances": adv, "declines": dec, "unchanged": unc})
                     print(f"  {bas_dd}: +{adv} -{dec} ={unc}")

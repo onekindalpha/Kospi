@@ -443,13 +443,14 @@ def make_plotly_chart(df, market, sig, chart_months, hlab) -> go.Figure:
         template="plotly_dark", height=660,
         title=dict(text=f"{MARKET_CFG[market]['label']} — {div_text}",
                    font=dict(size=14, color=div_color)),
-        xaxis_rangeslider_visible=False,
         hovermode="x unified",
         hoverlabel=dict(bgcolor="#1e1e2e", font_color="white", font_size=12, bordercolor="#444"),
         legend=dict(orientation="h", y=1.01, x=0),
         margin=dict(l=10, r=90, t=45, b=10),
         yaxis =dict(title="지수"),
         yaxis2=dict(title="A/D Line"),
+        xaxis =dict(rangeslider=dict(visible=False)),
+        xaxis2=dict(rangeslider=dict(visible=False)),
     )
     # 세로선: 모든 trace를 xaxis="x"로 묶어서 두 패널 동시 관통
     fig.update_traces(xaxis="x")
