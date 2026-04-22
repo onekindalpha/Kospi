@@ -469,12 +469,10 @@ def compute_hlab(df: pd.DataFrame, high_bars: int = 60, low_bars: int = 130) -> 
     )
 
 # ──────────────────────────────────────────────────────────────
-# 차트 — 2패널 (위: 지수 캔들 단독 / 아래: A/D Line 단독)
+# 차트 — domain 수동 분할 (rangeslider 문제 완전 회피)
 # ──────────────────────────────────────────────────────────────
 def make_plotly_chart(df: pd.DataFrame, market: str, sig: dict,
                       chart_months: int, hlab: dict) -> go.Figure:
-    from plotly.subplots import make_subplots
-
     end_dt   = pd.to_datetime(df["date"].astype(str), format="%Y%m%d").max()
     start_dt = end_dt - pd.DateOffset(months=chart_months)
     mask     = pd.to_datetime(df["date"].astype(str), format="%Y%m%d") >= start_dt
@@ -486,69 +484,92 @@ def make_plotly_chart(df: pd.DataFrame, market: str, sig: dict,
     lb_color = "rgba(38,210,160,0.95)" if hlab["bull_div"] else "rgba(160,160,160,0.8)"
     la_color = "rgba(38,210,160,0.6)"  if hlab["bull_div"] else "rgba(120,120,120,0.5)"
 
-    fig = make_subplots(rows=2, cols=1, shared_xaxes=True,
-                        row_heights=[0.5, 0.5], vertical_spacing=0.02)
-
-    # ── 위 패널: 지수 캔들 단독
-    fig.add_trace(go.Candlestick(
-        x=pf["dt"], open=pf["open"], high=pf["high"], low=pf["low"], close=pf["close"],
-        increasing_line_color="#26a69a", decreasing_line_color="#ef5350",
-        name=market, showlegend=False,
-    ), row=1, col=1)
-
-    # H_b/H_a/L_b/L_a 수평선 (위 패널)
-    for val, color, dash, ann in [
-        (hlab["hb_val"], hb_color, "dash", f"H_b {hlab['hb_val']:,.0f}"),
-        (hlab["ha_val"], ha_color, "dot",  f"H_a {hlab['ha_val']:,.0f}"),
-        (hlab["lb_val"], lb_color, "dash", f"L_b {hlab['lb_val']:,.0f}"),
-        (hlab["la_val"], la_color, "dot",  f"L_a {hlab['la_val']:,.0f}"),
-    ]:
-        fig.add_hline(y=val, line_color=color, line_dash=dash, line_width=1.3,
-                      annotation_text=ann, annotation_font_color=color,
-                      annotation_font_size=10, row=1, col=1)
-
-    # ── 아래 패널: A/D Line 단독
-    fig.add_trace(go.Scatter(
-        x=pf["dt"], y=pf["ad_line"].astype(float),
-        line=dict(color="#1e88e5", width=2.0), name="A/D Line",
-    ), row=2, col=1)
-
-    # A/D 수평선 (아래 패널)
-    for val, color, dash, ann in [
-        (hlab["hb_ad"], hb_color, "dash", f"A/D H_b {hlab['hb_ad']:,.0f}"),
-        (hlab["ha_ad"], ha_color, "dot",  f"A/D H_a {hlab['ha_ad']:,.0f}"),
-        (hlab["lb_ad"], lb_color, "dash", f"A/D L_b {hlab['lb_ad']:,.0f}"),
-        (hlab["la_ad"], la_color, "dot",  f"A/D L_a {hlab['la_ad']:,.0f}"),
-    ]:
-        fig.add_hline(y=val, line_color=color, line_dash=dash, line_width=1.0,
-                      annotation_text=ann, annotation_font_color=color,
-                      annotation_font_size=9, row=2, col=1)
-
-    # 불일치 연결선 (아래 패널)
-    if hlab["bear_div"]:
-        fig.add_shape(type="line", row=2, col=1,
-            x0=hlab["ha_dt"], y0=hlab["ha_ad"], x1=hlab["hb_dt"], y1=hlab["hb_ad"],
-            line=dict(color="rgba(255,80,80,0.9)", width=2, dash="dash"))
-        mid_dt = hlab["ha_dt"] + (hlab["hb_dt"] - hlab["ha_dt"]) / 2
-        fig.add_annotation(x=mid_dt, y=(hlab["ha_ad"]+hlab["hb_ad"])/2,
-                           text=f"⚠ {hlab['bear_div_pct']:.1f}%",
-                           font=dict(color="#ff5050", size=12), showarrow=False, row=2, col=1)
-    if hlab["bull_div"]:
-        fig.add_shape(type="line", row=2, col=1,
-            x0=hlab["la_dt"], y0=hlab["la_ad"], x1=hlab["lb_dt"], y1=hlab["lb_ad"],
-            line=dict(color="rgba(38,210,160,0.9)", width=2, dash="dash"))
-        mid_dt = hlab["la_dt"] + (hlab["lb_dt"] - hlab["la_dt"]) / 2
-        fig.add_annotation(x=mid_dt, y=(hlab["la_ad"]+hlab["lb_ad"])/2,
-                           text=f"✓ {hlab['bull_div_pct']:.1f}%",
-                           font=dict(color="#26d2a0", size=12), showarrow=False, row=2, col=1)
-
-    # 판정
     if hlab["bear_div"]:
         div_text, div_color = f"⚠ 부정적 불일치 {hlab['bear_div_pct']:.1f}%", "#ff5050"
     elif hlab["bull_div"]:
         div_text, div_color = f"✓ 긍정적 불일치 {hlab['bull_div_pct']:.1f}%", "#26d2a0"
     else:
         div_text, div_color = "불일치 없음", "#aaaaaa"
+
+    fig = go.Figure()
+
+    # ── 위 패널 (y1: domain 0.52~1.0): 캔들스틱
+    fig.add_trace(go.Candlestick(
+        x=pf["dt"], open=pf["open"], high=pf["high"], low=pf["low"], close=pf["close"],
+        increasing_line_color="#26a69a", decreasing_line_color="#ef5350",
+        name=market, showlegend=False,
+        xaxis="x", yaxis="y1",
+    ))
+
+    # ── 아래 패널 (y2: domain 0.0~0.48): A/D Line
+    fig.add_trace(go.Scatter(
+        x=pf["dt"], y=pf["ad_line"].astype(float),
+        line=dict(color="#1e88e5", width=2.0), name="A/D Line",
+        xaxis="x", yaxis="y2",
+    ))
+
+    # 가격 정규화선 (아래 패널 참조용)
+    ad_vals = pf["ad_line"].astype(float)
+    ad_min, ad_max = ad_vals.min(), ad_vals.max()
+    pr_min, pr_max = pf["close"].min(), pf["close"].max()
+    price_mapped = (ad_min + (pf["close"] - pr_min) / (pr_max - pr_min) * (ad_max - ad_min)
+                    if pr_max != pr_min else ad_vals)
+    fig.add_trace(go.Scatter(
+        x=pf["dt"], y=price_mapped,
+        line=dict(color="rgba(180,180,180,0.35)", width=1.0),
+        name="가격(참조)", showlegend=False,
+        xaxis="x", yaxis="y2",
+    ))
+
+    # 위 패널 수평선
+    for val, color, dash, ann in [
+        (hlab["hb_val"], hb_color, "dash", f"H_b {hlab['hb_val']:,.0f}"),
+        (hlab["ha_val"], ha_color, "dot",  f"H_a {hlab['ha_val']:,.0f}"),
+        (hlab["lb_val"], lb_color, "dash", f"L_b {hlab['lb_val']:,.0f}"),
+        (hlab["la_val"], la_color, "dot",  f"L_a {hlab['la_val']:,.0f}"),
+    ]:
+        fig.add_shape(type="line", x0=pf["dt"].iloc[0], x1=pf["dt"].iloc[-1],
+                      y0=val, y1=val, xref="x", yref="y1",
+                      line=dict(color=color, dash=dash, width=1.2))
+        fig.add_annotation(x=pf["dt"].iloc[-1], y=val, xref="x", yref="y1",
+                           text=ann, font=dict(color=color, size=10),
+                           xanchor="left", showarrow=False)
+
+    # 아래 패널 수평선
+    for val, color, dash, ann in [
+        (hlab["hb_ad"], hb_color, "dash", f"A/D H_b {hlab['hb_ad']:,.0f}"),
+        (hlab["ha_ad"], ha_color, "dot",  f"A/D H_a {hlab['ha_ad']:,.0f}"),
+        (hlab["lb_ad"], lb_color, "dash", f"A/D L_b {hlab['lb_ad']:,.0f}"),
+        (hlab["la_ad"], la_color, "dot",  f"A/D L_a {hlab['la_ad']:,.0f}"),
+    ]:
+        fig.add_shape(type="line", x0=pf["dt"].iloc[0], x1=pf["dt"].iloc[-1],
+                      y0=val, y1=val, xref="x", yref="y2",
+                      line=dict(color=color, dash=dash, width=1.0))
+        fig.add_annotation(x=pf["dt"].iloc[0], y=val, xref="x", yref="y2",
+                           text=ann, font=dict(color=color, size=9),
+                           xanchor="right", showarrow=False)
+
+    # 불일치 연결선
+    if hlab["bear_div"]:
+        fig.add_shape(type="line",
+            x0=hlab["ha_dt"], y0=hlab["ha_ad"], x1=hlab["hb_dt"], y1=hlab["hb_ad"],
+            xref="x", yref="y2",
+            line=dict(color="rgba(255,80,80,0.9)", width=2, dash="dash"))
+        mid_dt = hlab["ha_dt"] + (hlab["hb_dt"] - hlab["ha_dt"]) / 2
+        fig.add_annotation(x=mid_dt, y=(hlab["ha_ad"]+hlab["hb_ad"])/2,
+                           xref="x", yref="y2",
+                           text=f"⚠ {hlab['bear_div_pct']:.1f}%",
+                           font=dict(color="#ff5050", size=12), showarrow=False)
+    if hlab["bull_div"]:
+        fig.add_shape(type="line",
+            x0=hlab["la_dt"], y0=hlab["la_ad"], x1=hlab["lb_dt"], y1=hlab["lb_ad"],
+            xref="x", yref="y2",
+            line=dict(color="rgba(38,210,160,0.9)", width=2, dash="dash"))
+        mid_dt = hlab["la_dt"] + (hlab["lb_dt"] - hlab["la_dt"]) / 2
+        fig.add_annotation(x=mid_dt, y=(hlab["la_ad"]+hlab["lb_ad"])/2,
+                           xref="x", yref="y2",
+                           text=f"✓ {hlab['bull_div_pct']:.1f}%",
+                           font=dict(color="#26d2a0", size=12), showarrow=False)
 
     fig.update_layout(
         template="plotly_dark", height=660,
@@ -557,19 +578,23 @@ def make_plotly_chart(df: pd.DataFrame, market: str, sig: dict,
         hoverlabel=dict(bgcolor="#1e1e2e", font_color="white", font_size=12, bordercolor="#444"),
         legend=dict(orientation="h", y=1.01, x=0),
         margin=dict(l=10, r=90, t=45, b=10),
-        yaxis =dict(title="지수"),
-        yaxis2=dict(title="A/D Line"),
-        xaxis =dict(rangeslider=dict(visible=False), matches="x2"),
-        xaxis2=dict(rangeslider=dict(visible=False)),
+        xaxis=dict(
+            rangeslider=dict(visible=False),
+            showspikes=True, spikemode="across", spikesnap="cursor",
+            spikethickness=1, spikecolor="rgba(200,200,200,0.7)", spikedash="solid",
+            tickformat="%Y/%m/%d", dtick=7*24*60*60*1000,
+            tickangle=-45, tickfont=dict(size=8),
+            domain=[0, 1],
+        ),
+        yaxis=dict(
+            title="지수", domain=[0.52, 1.0],
+            showspikes=True, spikethickness=1, spikecolor="rgba(200,200,200,0.4)",
+        ),
+        yaxis2=dict(
+            title="A/D Line", domain=[0.0, 0.48],
+            showspikes=True, spikethickness=1, spikecolor="rgba(200,200,200,0.4)",
+        ),
     )
-    fig.update_xaxes(
-        showspikes=True, spikemode="across", spikesnap="cursor",
-        spikethickness=1, spikecolor="rgba(200,200,200,0.7)", spikedash="solid",
-        tickformat="%Y/%m/%d", dtick=7*24*60*60*1000,
-        tickangle=-45, tickfont=dict(size=8),
-    )
-    fig.update_yaxes(showspikes=True, spikethickness=1, spikecolor="rgba(200,200,200,0.4)")
-
     return fig
 
 # ──────────────────────────────────────────────────────────────
