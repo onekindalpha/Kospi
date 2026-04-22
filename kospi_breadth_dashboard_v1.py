@@ -468,7 +468,7 @@ def compute_hlab(df: pd.DataFrame, high_bars: int = 60, low_bars: int = 130) -> 
     )
 
 # ──────────────────────────────────────────────────────────────
-# 차트 — Plotly (호버 세로선 + H_a/H_b/L_a/L_b)
+# 차트 — 단일패널 secondary_y (세로선 끊김 없음)
 # ──────────────────────────────────────────────────────────────
 def make_plotly_chart(df: pd.DataFrame, market: str, sig: dict,
                       chart_months: int, hlab: dict) -> go.Figure:
@@ -480,120 +480,111 @@ def make_plotly_chart(df: pd.DataFrame, market: str, sig: dict,
     pf       = df[mask].copy().reset_index(drop=True)
     pf["dt"] = pd.to_datetime(pf["date"].astype(str), format="%Y%m%d")
 
-    # 색상
     hb_color = "rgba(255,80,80,0.95)"  if hlab["bear_div"] else "rgba(160,160,160,0.8)"
     ha_color = "rgba(255,140,140,0.6)" if hlab["bear_div"] else "rgba(120,120,120,0.5)"
     lb_color = "rgba(38,210,160,0.95)" if hlab["bull_div"] else "rgba(160,160,160,0.8)"
     la_color = "rgba(38,210,160,0.6)"  if hlab["bull_div"] else "rgba(120,120,120,0.5)"
 
-    fig = make_subplots(
-        rows=2, cols=1, shared_xaxes=True,
-        row_heights=[0.52, 0.48], vertical_spacing=0.0,
-    )
+    # 단일 패널, 이중 y축 — 세로선 끊김 없음
+    fig = make_subplots(specs=[[{"secondary_y": True}]])
 
-    # ── 1. 캔들스틱 (위 패널)
+    # 캔들 (좌축)
     fig.add_trace(go.Candlestick(
-        x=pf["dt"],
-        open=pf["open"], high=pf["high"], low=pf["low"], close=pf["close"],
+        x=pf["dt"], open=pf["open"], high=pf["high"], low=pf["low"], close=pf["close"],
         increasing_line_color="#26a69a", decreasing_line_color="#ef5350",
         name=market, showlegend=False,
-    ), row=1, col=1)
+    ), secondary_y=False)
 
-    # ── 2. 가격 수평선 (H_b, H_a, L_b, L_a)
-    for val, color, dash, label in [
-        (hlab["hb_val"], hb_color, "dash",  f"H_b {hlab['hb_val']:,.2f}"),
-        (hlab["ha_val"], ha_color, "dot",   f"H_a {hlab['ha_val']:,.2f}"),
-        (hlab["lb_val"], lb_color, "dash",  f"L_b {hlab['lb_val']:,.2f}"),
-        (hlab["la_val"], la_color, "dot",   f"L_a {hlab['la_val']:,.2f}"),
-    ]:
-        fig.add_hline(y=val, line_color=color, line_dash=dash, line_width=1.5,
-                      annotation_text=label, annotation_font_color=color,
-                      annotation_font_size=11, row=1, col=1)
-
-    # ── 3. A/D Line (아래 패널)
+    # A/D Line (우축)
     fig.add_trace(go.Scatter(
         x=pf["dt"], y=pf["ad_line"].astype(float),
-        line=dict(color="#1e88e5", width=2.5),
-        name="A/D Line",
-    ), row=2, col=1)
+        line=dict(color="#1e88e5", width=2.0), name="A/D Line",
+    ), secondary_y=True)
 
-    # 가격 곡선 겹쳐 표시 (A/D 스케일 정규화) — 트레이딩뷰 방식
-    ad_min = pf["ad_line"].astype(float).min(); ad_max = pf["ad_line"].astype(float).max()
-    pr_min = pf["close"].min();                 pr_max = pf["close"].max()
-    if pr_max != pr_min:
-        price_mapped = ad_min + (pf["close"] - pr_min) / (pr_max - pr_min) * (ad_max - ad_min)
-    else:
-        price_mapped = pf["ad_line"]
+    # 가격 정규화선 (우축, A/D 스케일)
+    ad_vals = pf["ad_line"].astype(float)
+    ad_min, ad_max = ad_vals.min(), ad_vals.max()
+    pr_min, pr_max = pf["close"].min(), pf["close"].max()
+    price_mapped = (ad_min + (pf["close"] - pr_min) / (pr_max - pr_min) * (ad_max - ad_min)
+                    if pr_max != pr_min else ad_vals)
     fig.add_trace(go.Scatter(
         x=pf["dt"], y=price_mapped,
-        line=dict(color="rgba(180,180,180,0.45)", width=1.2),
-        name="가격(겹침)", showlegend=False,
-    ), row=2, col=1)
+        line=dict(color="rgba(180,180,180,0.4)", width=1.0),
+        name="가격(참조)", showlegend=False,
+    ), secondary_y=True)
 
-    # ── 5. A/D 수평선 (H_b/H_a/L_b/L_a 기준)
-    for val, color, dash, label in [
-        (hlab["hb_ad"], hb_color, "dash",  f"A/D@H_b {hlab['hb_ad']:,.0f}"),
-        (hlab["ha_ad"], ha_color, "dot",   f"A/D@H_a {hlab['ha_ad']:,.0f}"),
-        (hlab["lb_ad"], lb_color, "dash",  f"A/D@L_b {hlab['lb_ad']:,.0f}"),
-        (hlab["la_ad"], la_color, "dot",   f"A/D@L_a {hlab['la_ad']:,.0f}"),
+    # 지수 수평선 H_b/H_a/L_b/L_a (좌축)
+    for val, color, dash, ann in [
+        (hlab["hb_val"], hb_color, "dash", f"H_b {hlab['hb_val']:,.0f}"),
+        (hlab["ha_val"], ha_color, "dot",  f"H_a {hlab['ha_val']:,.0f}"),
+        (hlab["lb_val"], lb_color, "dash", f"L_b {hlab['lb_val']:,.0f}"),
+        (hlab["la_val"], la_color, "dot",  f"L_a {hlab['la_val']:,.0f}"),
     ]:
-        fig.add_hline(y=val, line_color=color, line_dash=dash, line_width=1.5,
-                      annotation_text=label, annotation_font_color=color,
-                      annotation_font_size=10, row=2, col=1)
+        fig.add_shape(type="line", x0=pf["dt"].iloc[0], x1=pf["dt"].iloc[-1],
+                      y0=val, y1=val, yref="y",
+                      line=dict(color=color, dash=dash, width=1.2))
+        fig.add_annotation(x=pf["dt"].iloc[-1], y=val, yref="y",
+                           text=ann, font=dict(color=color, size=10),
+                           xanchor="left", showarrow=False)
 
-    # ── 6. 불일치 연결선 H_a→H_b, L_a→L_b (A/D 패널)
+    # A/D 수평선 (우축)
+    for val, color, dash, ann in [
+        (hlab["hb_ad"], hb_color, "dash", f"A/D H_b {hlab['hb_ad']:,.0f}"),
+        (hlab["ha_ad"], ha_color, "dot",  f"A/D H_a {hlab['ha_ad']:,.0f}"),
+        (hlab["lb_ad"], lb_color, "dash", f"A/D L_b {hlab['lb_ad']:,.0f}"),
+        (hlab["la_ad"], la_color, "dot",  f"A/D L_a {hlab['la_ad']:,.0f}"),
+    ]:
+        fig.add_shape(type="line", x0=pf["dt"].iloc[0], x1=pf["dt"].iloc[-1],
+                      y0=val, y1=val, yref="y2",
+                      line=dict(color=color, dash=dash, width=1.0))
+        fig.add_annotation(x=pf["dt"].iloc[0], y=val, yref="y2",
+                           text=ann, font=dict(color=color, size=9),
+                           xanchor="right", showarrow=False)
+
+    # 불일치 연결선 (우축)
     if hlab["bear_div"]:
         fig.add_shape(type="line",
-            x0=hlab["ha_dt"], y0=hlab["ha_ad"],
-            x1=hlab["hb_dt"], y1=hlab["hb_ad"],
-            line=dict(color="rgba(255,80,80,0.85)", width=2, dash="dash"),
-            row=2, col=1)
-        # 라벨
+            x0=hlab["ha_dt"], y0=hlab["ha_ad"], x1=hlab["hb_dt"], y1=hlab["hb_ad"],
+            yref="y2", line=dict(color="rgba(255,80,80,0.9)", width=2, dash="dash"))
         mid_dt = hlab["ha_dt"] + (hlab["hb_dt"] - hlab["ha_dt"]) / 2
-        mid_ad = (hlab["ha_ad"] + hlab["hb_ad"]) / 2
-        fig.add_annotation(x=mid_dt, y=mid_ad, text=f"⚠ {hlab['bear_div_pct']:.1f}%",
-                           font=dict(color="rgba(255,80,80,0.9)", size=11),
-                           showarrow=False, row=2, col=1)
+        fig.add_annotation(x=mid_dt, y=(hlab["ha_ad"]+hlab["hb_ad"])/2, yref="y2",
+                           text=f"⚠ {hlab['bear_div_pct']:.1f}%",
+                           font=dict(color="rgba(255,80,80,1)", size=12), showarrow=False)
     if hlab["bull_div"]:
         fig.add_shape(type="line",
-            x0=hlab["la_dt"], y0=hlab["la_ad"],
-            x1=hlab["lb_dt"], y1=hlab["lb_ad"],
-            line=dict(color="rgba(38,210,160,0.85)", width=2, dash="dash"),
-            row=2, col=1)
+            x0=hlab["la_dt"], y0=hlab["la_ad"], x1=hlab["lb_dt"], y1=hlab["lb_ad"],
+            yref="y2", line=dict(color="rgba(38,210,160,0.9)", width=2, dash="dash"))
         mid_dt = hlab["la_dt"] + (hlab["lb_dt"] - hlab["la_dt"]) / 2
-        mid_ad = (hlab["la_ad"] + hlab["lb_ad"]) / 2
-        fig.add_annotation(x=mid_dt, y=mid_ad, text=f"✓ {hlab['bull_div_pct']:.1f}%",
-                           font=dict(color="rgba(38,210,160,0.9)", size=11),
-                           showarrow=False, row=2, col=1)
+        fig.add_annotation(x=mid_dt, y=(hlab["la_ad"]+hlab["lb_ad"])/2, yref="y2",
+                           text=f"✓ {hlab['bull_div_pct']:.1f}%",
+                           font=dict(color="rgba(38,210,160,1)", size=12), showarrow=False)
 
-    # ── 판정 제목
-    div_text = ""
+    # 판정
     if hlab["bear_div"]:
-        div_text = f"  ⚠ 부정적 불일치 {hlab['bear_div_pct']:.1f}%"
+        div_text, div_color = f"⚠ 부정적 불일치 {hlab['bear_div_pct']:.1f}%", "#ff5050"
     elif hlab["bull_div"]:
-        div_text = f"  ✓ 긍정적 불일치 {hlab['bull_div_pct']:.1f}%"
+        div_text, div_color = f"✓ 긍정적 불일치 {hlab['bull_div_pct']:.1f}%", "#26d2a0"
+    else:
+        div_text, div_color = "불일치 없음", "#aaaaaa"
 
     fig.update_layout(
-        template="plotly_dark",
-        height=680,
-        title=dict(text=f"{market} 브레드스 — {sig['verdict']}{div_text}", font_size=13),
+        template="plotly_dark", height=620,
+        title=dict(text=f"{market} — {div_text}", font=dict(size=14, color=div_color)),
         xaxis_rangeslider_visible=False,
         hovermode="x unified",
+        hoverlabel=dict(bgcolor="#1e1e2e", font_color="white", font_size=12, bordercolor="#444"),
         legend=dict(orientation="h", y=1.01, x=0),
-        margin=dict(l=10, r=80, t=45, b=10),
-        yaxis=dict(title="지수", title_font_size=10),
-        yaxis2=dict(title="A/D Line", title_font_size=10),
+        margin=dict(l=10, r=90, t=45, b=10),
     )
-    spike_cfg = dict(
+    fig.update_xaxes(
         showspikes=True, spikemode="across", spikesnap="cursor",
-        spikethickness=1, spikecolor="rgba(200,200,200,0.6)", spikedash="solid",
-        tickformat="%m/%d",
-        dtick=7 * 24 * 60 * 60 * 1000,
-        tickangle=-45, tickfont=dict(size=9),
+        spikethickness=1, spikecolor="rgba(200,200,200,0.7)", spikedash="solid",
+        tickformat="%Y/%m/%d", dtick=7*24*60*60*1000,
+        tickangle=-45, tickfont=dict(size=8),
     )
-    fig.update_xaxes(**spike_cfg)
-    fig.update_layout(xaxis2=dict(matches="x", **spike_cfg))
-    fig.update_yaxes(showspikes=True, spikethickness=1, spikecolor="rgba(200,200,200,0.4)")
+    fig.update_yaxes(title_text="지수",    secondary_y=False,
+                     showspikes=True, spikethickness=1, spikecolor="rgba(200,200,200,0.4)")
+    fig.update_yaxes(title_text="A/D Line", secondary_y=True, showgrid=False)
 
     return fig
 
@@ -611,17 +602,28 @@ def main():
         st.header("⚙️ 설정")
         market = st.selectbox("마켓", ["KOSPI", "KOSDAQ"])
 
-        auth_key = st.text_input("KRX AUTH_KEY",
-                                 value=os.environ.get("KRX_AUTH_KEY", ""),
-                                 type="password")
-        c1, c2 = st.columns(2)
-        today = datetime.today()
-        start_dt = c1.date_input("시작일", value=today - timedelta(days=730))
-        end_dt   = c2.date_input("종료일", value=today)
-        base_value = st.number_input("A/D Line 시작값", value=50000.0, step=1000.0)
+        mode = st.radio("데이터 소스", ["☁️ GitHub (빠름)", "🔑 KRX API (직접 수집)"],
+                        index=0,
+                        help="GitHub: Actions가 매일 자동 업데이트한 CSV 사용\nKRX API: 직접 수집 (AUTH_KEY 필요)")
+
+        if mode == "🔑 KRX API (직접 수집)":
+            auth_key = st.text_input("KRX AUTH_KEY",
+                                     value=os.environ.get("KRX_AUTH_KEY", ""),
+                                     type="password")
+            c1, c2 = st.columns(2)
+            today = datetime.today()
+            start_dt = c1.date_input("시작일", value=today - timedelta(days=730))
+            end_dt   = c2.date_input("종료일", value=today)
+            base_value = st.number_input("A/D Line 시작값", value=50000.0, step=1000.0)
+        else:
+            auth_key = ""
+            today = datetime.today()
+            start_dt = today - timedelta(days=730)
+            end_dt   = today
 
         fetch_btn = st.button("🔄 데이터 불러오기", type="primary", use_container_width=True)
-        st.caption("💡 새로 불러오고 싶으면 아래 캐시를 지우고 불러오세요.")
+        if mode == "🔑 KRX API (직접 수집)":
+            st.caption("💡 새로 불러오고 싶으면 아래 캐시를 지우고 불러오세요.")
 
         st.divider()
         st.subheader("분석 파라미터")
@@ -654,29 +656,38 @@ def main():
         return
 
     if fetch_btn:
-        if not auth_key:
-            st.error("KRX AUTH_KEY를 입력해주세요.")
-            return
-        start_str = start_dt.strftime("%Y%m%d")
-        end_str   = end_dt.strftime("%Y%m%d")
-        cached = load_cache(market, start_str, end_str, 50000.0)
-        if cached is not None:
-            st.success(f"✅ 캐시에서 로드 ({market} {start_str}~{end_str})")
-            df = cached
-        else:
+        if mode == "☁️ GitHub (빠름)":
             try:
-                with st.spinner("지수 OHLC 수집 중…"):
-                    index_df = fetch_index_ohlc(market, start_str, end_str)
-                breadth_df = build_breadth(auth_key, start_str, end_str, market, 50000.0)
-                df = breadth_df.merge(
-                    index_df[["date","open","high","low","close"]],
-                    on="date", how="inner"
-                ).sort_values("date").reset_index(drop=True)
-                save_cache(df, market, start_str, end_str, 50000.0)
-                st.success(f"✅ 수집 완료 — {len(df)}일치")
+                with st.spinner("GitHub에서 CSV 읽는 중…"):
+                    df = load_from_github(market)
+                st.success(f"✅ GitHub 로드 완료 — {len(df)}일치 / 최신: {df['date'].iloc[-1]}")
             except Exception as e:
-                st.error(f"데이터 수집 실패: {e}")
+                st.error(f"GitHub 로드 실패: {e}")
                 return
+        else:
+            if not auth_key:
+                st.error("KRX AUTH_KEY를 입력해주세요.")
+                return
+            start_str = start_dt.strftime("%Y%m%d")
+            end_str   = end_dt.strftime("%Y%m%d")
+            cached = load_cache(market, start_str, end_str, 50000.0)
+            if cached is not None:
+                st.success(f"✅ 캐시에서 로드 ({market} {start_str}~{end_str})")
+                df = cached
+            else:
+                try:
+                    with st.spinner("지수 OHLC 수집 중…"):
+                        index_df = fetch_index_ohlc(market, start_str, end_str)
+                    breadth_df = build_breadth(auth_key, start_str, end_str, market, 50000.0)
+                    df = breadth_df.merge(
+                        index_df[["date","open","high","low","close"]],
+                        on="date", how="inner"
+                    ).sort_values("date").reset_index(drop=True)
+                    save_cache(df, market, start_str, end_str, 50000.0)
+                    st.success(f"✅ 수집 완료 — {len(df)}일치")
+                except Exception as e:
+                    st.error(f"데이터 수집 실패: {e}")
+                    return
 
         st.session_state["df_merged"] = df
         st.session_state["df_market"] = market
@@ -869,7 +880,7 @@ def main():
                 # 4주 MA 전체 기준 계산
                 ns_all   = pd.Series(nhnl_df["nhnl"].values.astype(float))
                 nma_all  = ns_all.rolling(4).mean()
-                nma_plot = nma_all.iloc[nhnl_df["dt"] >= start_dt3].reset_index(drop=True)
+                nma_plot = nma_all.iloc[(nhnl_df["dt"] >= start_dt3).values].reset_index(drop=True)
 
                 last_nhnl = int(ns_all.iloc[-1])
                 last_nh   = int(nhnl_df["new_highs"].iloc[-1])
@@ -878,21 +889,12 @@ def main():
                 # 판정: 4주 MA 기울기
                 lma = nma_all.iloc[-1]; pma = nma_all.iloc[-2] if len(nma_all) >= 2 else lma
                 nhnl_ma_vals = nma_all.dropna()
-                if len(nhnl_ma_vals) >= 2:
-                    x_idx = np.arange(len(nhnl_ma_vals))
-                    slope = np.polyfit(x_idx, nhnl_ma_vals.values, 1)[0]
-                else:
-                    slope = 0.0
-                if pd.isna(lma):
-                    nhnl_verdict, trend_color = "⚪ 데이터 부족", "#757575"
-                elif lma > 0 and lma > pma:
-                    nhnl_verdict, trend_color = "🟢 강세 상승", "#2e7d32"
-                elif lma > 0 and lma <= pma:
-                    nhnl_verdict, trend_color = "🟡 강세 둔화", "#f9a825"
-                elif lma < 0 and lma < pma:
-                    nhnl_verdict, trend_color = "🔴 약세 하락", "#c62828"
-                else:
-                    nhnl_verdict, trend_color = "🟠 약세 회복 중", "#ef6c00"
+                slope = np.polyfit(np.arange(len(nhnl_ma_vals)), nhnl_ma_vals.values, 1)[0] if len(nhnl_ma_vals) >= 2 else 0.0
+                if pd.isna(lma):            nhnl_verdict, trend_color = "⚪ 데이터 부족",   "#757575"
+                elif lma > 0 and lma > pma: nhnl_verdict, trend_color = "🟢 강세 상승",     "#2e7d32"
+                elif lma > 0:               nhnl_verdict, trend_color = "🟡 강세 둔화",     "#f9a825"
+                elif lma < 0 and lma < pma: nhnl_verdict, trend_color = "🔴 약세 하락",     "#c62828"
+                else:                       nhnl_verdict, trend_color = "🟠 약세 회복 중",   "#ef6c00"
 
                 h1, h2, h3, h4, h5 = st.columns(5)
                 h1.metric("신고가 종목 수", f"{last_nh:,}")
@@ -905,57 +907,55 @@ def main():
                 pf_idx3 = df[pd.to_datetime(df["date"].astype(str), format="%Y%m%d") >= start_dt3].copy()
                 pf_idx3["dt"] = pd.to_datetime(pf_idx3["date"].astype(str), format="%Y%m%d")
 
-                fig_hl = _msp2(rows=2, cols=1, shared_xaxes=True,
-                               row_heights=[0.45, 0.55], vertical_spacing=0.0)
+                # 단일 패널 secondary_y — 세로선 끊김 없음
+                fig_hl = _msp2(specs=[[{"secondary_y": True}]])
 
-                # 위 패널: 지수 캔들
-                fig_hl.add_trace(go.Candlestick(
-                    x=pf_idx3["dt"],
-                    open=pf_idx3["open"], high=pf_idx3["high"],
-                    low=pf_idx3["low"],   close=pf_idx3["close"],
-                    increasing_line_color="#26a69a", decreasing_line_color="#ef5350",
-                    name=market, showlegend=False,
-                ), row=1, col=1)
+                # 지수 곡선 (좌축)
+                fig_hl.add_trace(go.Scatter(
+                    x=pf_idx3["dt"], y=pf_idx3["close"],
+                    line=dict(color="rgba(200,200,200,0.8)", width=1.5),
+                    name=f"{market} 지수",
+                ), secondary_y=False)
 
-                # 아래 패널: NH-NL 막대 + 4주 MA + 기울기 추세선
-                fig_hl.add_trace(go.Bar(
-                    x=pf3["dt"], y=pf3["nhnl"],
-                    marker_color=[("#26a69a" if v >= 0 else "#ef5350") for v in pf3["nhnl"]],
-                    name="NH-NL", opacity=0.75,
-                ), row=2, col=1)
+                # NH-NL 곡선 (우축)
+                fig_hl.add_trace(go.Scatter(
+                    x=pf3["dt"], y=pf3["nhnl"].astype(float),
+                    line=dict(color="#26a69a", width=1.8),
+                    name="NH-NL",
+                ), secondary_y=True)
+
+                # 4주 MA 곡선 (우축)
                 fig_hl.add_trace(go.Scatter(
                     x=pf3["dt"], y=nma_plot,
                     line=dict(color="orange", width=2),
                     name="4주 MA",
-                ), row=2, col=1)
-                if len(nhnl_ma_vals) >= 2:
-                    trend_y = np.polyval(np.polyfit(x_idx, nhnl_ma_vals.values, 1), x_idx)
-                    fig_hl.add_trace(go.Scatter(
-                        x=pf3["dt"].iloc[-len(nhnl_ma_vals):], y=trend_y,
-                        line=dict(color=trend_color, width=1.5, dash="dash"),
-                        name="기울기", showlegend=True,
-                    ), row=2, col=1)
-                fig_hl.add_hline(y=0, line_color="gray", line_dash="dot", row=2, col=1)
+                ), secondary_y=True)
+
+                # 0선
+                fig_hl.add_hline(y=0, line_color="gray", line_dash="dot", secondary_y=True)
 
                 fig_hl.update_layout(
-                    template="plotly_dark", height=600,
-                    title=dict(text=f"{market} NH-NL — {nhnl_verdict}  (4주MA 기울기 {slope:+.1f}/주)", font_size=13),
+                    template="plotly_dark", height=520,
+                    title=dict(text=f"{market} NH-NL — {nhnl_verdict}  (4주MA 기울기 {slope:+.1f}/주)",
+                               font=dict(size=13, color=trend_color)),
                     hovermode="x unified",
-                    margin=dict(l=10, r=10, t=45, b=10),
+                    hoverlabel=dict(bgcolor="#1e1e2e", font_color="white",
+                                   font_size=12, bordercolor="#444"),
+                    margin=dict(l=10, r=60, t=45, b=10),
                     xaxis_rangeslider_visible=False,
-                    yaxis=dict(title="지수", title_font_size=10),
-                    yaxis2=dict(title="NH-NL", title_font_size=10),
                     legend=dict(orientation="h", y=1.01),
                 )
-                spike_cfg2 = dict(
+                fig_hl.update_xaxes(
                     showspikes=True, spikemode="across", spikesnap="cursor",
-                    spikethickness=1, spikecolor="rgba(200,200,200,0.6)", spikedash="solid",
-                    tickformat="%m/%d", dtick=7*24*60*60*1000,
-                    tickangle=-45, tickfont=dict(size=9),
+                    spikethickness=1, spikecolor="rgba(200,200,200,0.7)", spikedash="solid",
+                    tickformat="%Y/%m/%d", dtick=7*24*60*60*1000,
+                    tickangle=-45, tickfont=dict(size=8),
                 )
-                fig_hl.update_xaxes(**spike_cfg2)
-                fig_hl.update_layout(xaxis2=dict(matches="x", **spike_cfg2))
-                fig_hl.update_yaxes(showspikes=True, spikethickness=1, spikecolor="rgba(200,200,200,0.4)")
+                fig_hl.update_yaxes(title_text="지수",  secondary_y=False,
+                                    showspikes=True, spikethickness=1, spikecolor="rgba(200,200,200,0.4)")
+                fig_hl.update_yaxes(title_text="NH-NL", secondary_y=True,
+                                    showgrid=False, zeroline=True,
+                                    zerolinecolor="rgba(150,150,150,0.4)")
                 st.plotly_chart(fig_hl, use_container_width=True)
 
 if __name__ == "__main__":
