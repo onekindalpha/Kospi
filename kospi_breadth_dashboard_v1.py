@@ -559,11 +559,9 @@ def make_plotly_chart(df: pd.DataFrame, market: str, sig: dict,
         margin=dict(l=10, r=90, t=45, b=10),
         yaxis =dict(title="지수"),
         yaxis2=dict(title="A/D Line"),
-        xaxis =dict(rangeslider=dict(visible=False)),
+        xaxis =dict(rangeslider=dict(visible=False), matches="x2"),
         xaxis2=dict(rangeslider=dict(visible=False)),
     )
-    # 세로선: 모든 trace를 xaxis="x"로 묶어서 두 패널 동시 관통
-    fig.update_traces(xaxis="x")
     fig.update_xaxes(
         showspikes=True, spikemode="across", spikesnap="cursor",
         spikethickness=1, spikecolor="rgba(200,200,200,0.7)", spikedash="solid",
@@ -739,10 +737,10 @@ def main():
         with st.expander("📋 원시 데이터 보기"):
             show = df.copy()
             show["date"] = pd.to_datetime(show["date"].astype(str), format="%Y%m%d").dt.strftime("%Y-%m-%d")
+            cols = [c for c in ["date","advances","declines","unchanged",
+                      "ad_diff","ad_line","close","breadth_thrust_ema10"] if c in show.columns]
             st.dataframe(
-                show[["date","advances","declines","unchanged",
-                      "ad_diff","ad_line","close","breadth_thrust_ema10"]]
-                .sort_values("date", ascending=False).reset_index(drop=True),
+                show[cols].sort_values("date", ascending=False).reset_index(drop=True),
                 use_container_width=True,
             )
             csv = show.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig")
