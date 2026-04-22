@@ -469,7 +469,7 @@ def make_plotly_chart(df, market, sig, chart_months, hlab) -> go.Figure:
         title=dict(text=f"{MARKET_CFG[market]['label']} — {div_text}",
                    font=dict(size=14, color=div_color)),
         hovermode="x unified",
-        hoverlabel=dict(bgcolor="#1e1e2e", font_color="white", font_size=12, bordercolor="#444"),
+        hoverlabel=dict(bgcolor="#1e1e2e", font_color="#ffffff", font_size=12, bordercolor="#555"),
         legend=dict(orientation="h", y=1.01, x=0),
         margin=dict(l=10, r=90, t=45, b=10),
         xaxis=dict(
