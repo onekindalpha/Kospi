@@ -293,6 +293,9 @@ def compute_hlab(df: pd.DataFrame, high_bars: int = 60, low_bars: int = 130) -> 
         return arr[start:end_idx], start
 
     hb_window, hb_start = _safe_slice(closes, n, high_bars)
+    if len(hb_window) == 0:
+        hb_window = closes
+        hb_start  = 0
     hb_idx_local = int(np.argmax(hb_window))
     hb_idx = hb_start + hb_idx_local
     hb_val, hb_dt, hb_ad = closes[hb_idx], dts.iloc[hb_idx], ad_line[hb_idx]
@@ -306,6 +309,9 @@ def compute_hlab(df: pd.DataFrame, high_bars: int = 60, low_bars: int = 130) -> 
         ha_val, ha_dt, ha_ad = hb_val, hb_dt, hb_ad
 
     lb_window, lb_start = _safe_slice(closes, n, low_bars)
+    if len(lb_window) == 0:
+        lb_window = closes
+        lb_start  = 0
     lb_idx_local = int(np.argmin(lb_window))
     lb_idx = lb_start + lb_idx_local
     lb_val, lb_dt, lb_ad = closes[lb_idx], dts.iloc[lb_idx], ad_line[lb_idx]
@@ -404,7 +410,7 @@ def make_plotly_chart(df, market, sig, chart_months, hlab) -> go.Figure:
     fig.add_trace(go.Scatter(
         x=pf["dt"], y=price_mapped,
         line=dict(color="rgba(180,180,180,0.45)", width=1.2),
-        name="가격(겹침)",
+        name="가격(겹침)", showlegend=False,
     ), row=2, col=1)
 
     for val, color, dash, label in [
@@ -447,13 +453,17 @@ def make_plotly_chart(df, market, sig, chart_months, hlab) -> go.Figure:
         legend=dict(orientation="h", y=1.01, x=0),
         margin=dict(l=10, r=80, t=55, b=10),
     )
-    fig.update_xaxes(
+    # 호버 세로선 — 두 패널 동시 관통
+    spike_cfg = dict(
         showspikes=True, spikemode="across", spikesnap="cursor",
-        spikethickness=1, spikecolor="#aaa", spikedash="dot",
-        tickformat="%m/%d", dtick=7*24*60*60*1000,
+        spikethickness=1, spikecolor="rgba(200,200,200,0.6)", spikedash="solid",
+        tickformat="%m/%d",
+        dtick=7 * 24 * 60 * 60 * 1000,
         tickangle=-45, tickfont=dict(size=9),
     )
-    fig.update_yaxes(showspikes=True, spikethickness=1, spikecolor="#aaa")
+    fig.update_xaxes(**spike_cfg)
+    fig.update_layout(xaxis2=dict(matches="x", **spike_cfg))
+    fig.update_yaxes(showspikes=True, spikethickness=1, spikecolor="rgba(200,200,200,0.4)")
     return fig
 
 # ──────────────────────────────────────────────────────────────

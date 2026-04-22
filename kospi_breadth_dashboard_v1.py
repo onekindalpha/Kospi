@@ -410,6 +410,9 @@ def compute_hlab(df: pd.DataFrame, high_bars: int = 60, low_bars: int = 130) -> 
 
     # H_b: 최근 high_bars 구간
     hb_window, hb_start = _safe_slice(closes, n, high_bars)
+    if len(hb_window) == 0:
+        hb_window = closes
+        hb_start  = 0
     hb_idx_local = int(np.argmax(hb_window))
     hb_idx  = hb_start + hb_idx_local
     hb_val  = closes[hb_idx]
@@ -429,6 +432,9 @@ def compute_hlab(df: pd.DataFrame, high_bars: int = 60, low_bars: int = 130) -> 
 
     # L_b: 최근 low_bars 구간
     lb_window, lb_start = _safe_slice(closes, n, low_bars)
+    if len(lb_window) == 0:
+        lb_window = closes
+        lb_start  = 0
     lb_idx_local = int(np.argmin(lb_window))
     lb_idx  = lb_start + lb_idx_local
     lb_val  = closes[lb_idx]
@@ -522,7 +528,7 @@ def make_plotly_chart(df: pd.DataFrame, market: str, sig: dict,
     fig.add_trace(go.Scatter(
         x=pf["dt"], y=price_mapped,
         line=dict(color="rgba(180,180,180,0.5)", width=1.2),
-        name="가격(겹침)", showlegend=True,
+        name="가격(겹침)", showlegend=False,
     ), row=2, col=1)
 
     # ── 5. A/D 수평선 (H_b/H_a/L_b/L_a 기준)
@@ -577,16 +583,18 @@ def make_plotly_chart(df: pd.DataFrame, market: str, sig: dict,
         legend=dict(orientation="h", y=1.01, x=0),
         margin=dict(l=10, r=80, t=55, b=10),
     )
-    # 호버 세로선 (양쪽 패널)
-    fig.update_xaxes(
+    # 호버 세로선 — 두 패널 동시 관통
+    spike_cfg = dict(
         showspikes=True, spikemode="across", spikesnap="cursor",
-        spikethickness=1, spikecolor="#aaa", spikedash="dot",
-        # 모든 날짜 눈금 (주 단위)
+        spikethickness=1, spikecolor="rgba(200,200,200,0.6)", spikedash="solid",
         tickformat="%m/%d",
-        dtick=7 * 24 * 60 * 60 * 1000,  # 7일(ms)
+        dtick=7 * 24 * 60 * 60 * 1000,
         tickangle=-45, tickfont=dict(size=9),
     )
-    fig.update_yaxes(showspikes=True, spikethickness=1, spikecolor="#aaa")
+    fig.update_xaxes(**spike_cfg)
+    # xaxis2(아래 패널)도 xaxis에 연결해 spike가 두 패널에 동시에 표시됨
+    fig.update_layout(xaxis2=dict(matches="x", **spike_cfg))
+    fig.update_yaxes(showspikes=True, spikethickness=1, spikecolor="rgba(200,200,200,0.4)")
 
     return fig
 
