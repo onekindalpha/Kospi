@@ -28,13 +28,13 @@ jobs:
       - name: Run update script
         env:
           KRX_AUTH_KEY: ${{ secrets.KRX_AUTH_KEY }}
-        run: python update_breadth.py
+        run: python update_breadth.py || true   # KOSDAQ 실패해도 계속 진행
 
       - name: Commit and push updated CSVs
-              run: |
-                git config user.name  "github-actions[bot]"
-                git config user.email "github-actions[bot]@users.noreply.github.com"
-                git pull --rebase origin main
-                git add data/
-                git diff --cached --quiet || git commit -m "chore: update breadth data $(date +%Y%m%d)"
-                git push
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git pull --rebase origin main
+          git add data/
+          git diff --cached --quiet || git commit -m "chore: update breadth data $(date +%Y%m%d)"
+          git push
