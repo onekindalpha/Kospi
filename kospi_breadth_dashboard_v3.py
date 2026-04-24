@@ -16,6 +16,10 @@ GITHUB_NHNL = {
     "KOSPI":  f"{GITHUB_RAW}/kospi_nhnl.csv",
     "KOSDAQ": f"{GITHUB_RAW}/kosdaq_nhnl.csv",
 }
+GITHUB_NHNL_DAILY = {
+    "KOSPI":  f"{GITHUB_RAW}/kospi_nhnl_daily.csv",
+    "KOSDAQ": f"{GITHUB_RAW}/kosdaq_nhnl_daily.csv",
+}
 
 import hashlib
 import io
@@ -355,6 +359,24 @@ def load_from_github(market: str) -> pd.DataFrame:
     return df
 
 @st.cache_data(show_spinner=False, ttl=1800)
+def load_nhnl_daily_from_github(market: str):
+    """GitHub에 push된 NH-NL 일별 CSV를 읽어 반환 (없으면 None)"""
+    import requests as _req
+    if market not in GITHUB_NHNL_DAILY:
+        return None
+    url = GITHUB_NHNL_DAILY[market]
+    try:
+        resp = _req.get(url, timeout=15)
+        if resp.status_code != 200:
+            return None
+        df = pd.read_csv(io.StringIO(resp.text))
+        df["date"] = df["date"].astype(int)
+        df["dt"] = pd.to_datetime(df["date"].astype(str), format="%Y%m%d")
+        return df.sort_values("date").reset_index(drop=True)
+    except Exception:
+        return None
+
+@st.cache_data(show_spinner=False, ttl=1800)
 def load_nhnl_from_github(market: str):
     """GitHub에 push된 NH-NL CSV를 읽어 반환 (없으면 None)"""
     import requests as _req
@@ -564,10 +586,28 @@ def make_plotly_chart(df: pd.DataFrame, market: str, sig: dict,
     ad_span = max(ad_max - ad_min, max(abs(ad_max), 1.0) * 0.02, 1.0)
     y2_range = [ad_min - ad_span * 0.10, ad_max + ad_span * 0.10]
 
+    # 파인스크립트 v16과 동일한 3단계 기준 (warnPct=0.5, dangerPct=2.0)
+    _warn_pct   = 0.5
+    _danger_pct = 2.0
     if hlab["bear_div"]:
-        div_text, div_color = f"⚠ 부정적 불일치 {hlab['bear_div_pct']:.1f}%", "#ff5050"
+        _p = hlab["bear_div_pct"]
+        if _p >= _danger_pct:
+            div_text  = f"🔴 부정적 불일치 (위험) {_p:.1f}%"
+            div_color = "#c62828"
+        elif _p >= _warn_pct:
+            div_text  = f"🟠 부정적 불일치 (주의) {_p:.1f}%"
+            div_color = "#ef6c00"
+        else:
+            div_text  = f"🟡 초기 부정적 불일치 {_p:.1f}%"
+            div_color = "#f9a825"
     elif hlab["bull_div"]:
-        div_text, div_color = f"✓ 긍정적 불일치 {hlab['bull_div_pct']:.1f}%", "#26d2a0"
+        _p = hlab["bull_div_pct"]
+        if _p >= _warn_pct:
+            div_text  = f"🟢 긍정적 불일치 (바닥 신호) {_p:.1f}%"
+            div_color = "#26d2a0"
+        else:
+            div_text  = f"🔵 초기 긍정적 불일치 {_p:.1f}%"
+            div_color = "#1e88e5"
     else:
         div_text, div_color = "불일치 없음", "#aaaaaa"
 
@@ -589,7 +629,7 @@ def make_plotly_chart(df: pd.DataFrame, market: str, sig: dict,
         xaxis="x", yaxis="y2",
     ))
 
-    # 위 패널 수평선 (yref="y1")
+    # 위 패널 수평선 (yref="y1") — 레이블 왼쪽에 표시
     for val, color, dash, ann in [
         (hlab["hb_val"], hb_color, "dash", f"H_b {hlab['hb_val']:,.0f}"),
         (hlab["ha_val"], ha_color, "dot",  f"H_a {hlab['ha_val']:,.0f}"),
@@ -599,9 +639,9 @@ def make_plotly_chart(df: pd.DataFrame, market: str, sig: dict,
         fig.add_shape(type="line", x0=pf["dt"].iloc[0], x1=pf["dt"].iloc[-1],
                       y0=val, y1=val, xref="x", yref="y1",
                       line=dict(color=color, dash=dash, width=1.2))
-        fig.add_annotation(x=pf["dt"].iloc[-1], y=val, xref="x", yref="y1",
+        fig.add_annotation(x=pf["dt"].iloc[0], y=val, xref="x", yref="y1",
                            text=ann, font=dict(color=color, size=10),
-                           xanchor="left", showarrow=False)
+                           xanchor="right", showarrow=False)
 
     # 아래 패널 수평선 (yref="y2")
     for val, color, dash, ann in [
@@ -617,27 +657,17 @@ def make_plotly_chart(df: pd.DataFrame, market: str, sig: dict,
                            text=ann, font=dict(color=color, size=9),
                            xanchor="right", showarrow=False)
 
-    # 불일치 연결선
+    # 불일치 연결선 (퍼센트 표시는 타이틀에 이미 있으므로 제거)
     if hlab["bear_div"]:
         fig.add_shape(type="line",
             x0=hlab["ha_dt"], y0=hlab["ha_ad"], x1=hlab["hb_dt"], y1=hlab["hb_ad"],
             xref="x", yref="y2",
             line=dict(color="rgba(255,80,80,0.9)", width=2, dash="dash"))
-        mid_dt = hlab["ha_dt"] + (hlab["hb_dt"] - hlab["ha_dt"]) / 2
-        fig.add_annotation(x=mid_dt, y=(hlab["ha_ad"]+hlab["hb_ad"])/2,
-                           xref="x", yref="y2",
-                           text=f"⚠ {hlab['bear_div_pct']:.1f}%",
-                           font=dict(color="#ff5050", size=12), showarrow=False)
     if hlab["bull_div"]:
         fig.add_shape(type="line",
             x0=hlab["la_dt"], y0=hlab["la_ad"], x1=hlab["lb_dt"], y1=hlab["lb_ad"],
             xref="x", yref="y2",
             line=dict(color="rgba(38,210,160,0.9)", width=2, dash="dash"))
-        mid_dt = hlab["la_dt"] + (hlab["lb_dt"] - hlab["la_dt"]) / 2
-        fig.add_annotation(x=mid_dt, y=(hlab["la_ad"]+hlab["lb_ad"])/2,
-                           xref="x", yref="y2",
-                           text=f"✓ {hlab['bull_div_pct']:.1f}%",
-                           font=dict(color="#26d2a0", size=12), showarrow=False)
 
     # A/D 데이터 lookup: ISO 날짜문자열 → float (JS 자석선에 사용)
     ad_lookup = {
@@ -750,8 +780,10 @@ def main():
                 with st.spinner("GitHub에서 CSV 읽는 중…"):
                     df = load_from_github(market)
                     nhnl_df = load_nhnl_from_github(market)
+                    nhnl_daily_df = load_nhnl_daily_from_github(market)
                 st.success(f"✅ GitHub 로드 완료 — {len(df)}일치 / 최신: {df['date'].iloc[-1]}")
                 st.session_state[f"nhnl_{market}"] = nhnl_df if nhnl_df is not None and not nhnl_df.empty else None
+                st.session_state[f"nhnl_daily_{market}"] = nhnl_daily_df if nhnl_daily_df is not None and not nhnl_daily_df.empty else None
                 if nhnl_df is None or nhnl_df.empty:
                     st.info("GitHub 빠른 모드에서는 저장된 NH-NL CSV가 있을 때만 NH-NL 탭을 표시합니다.")
             except Exception as e:
@@ -851,25 +883,55 @@ def main():
     # TAB 1: 기존 A/D Line 분석
     # ══════════════════════════════════════════════
     if active_tab == "📈 A/D Line":
-        gap_color = "#00897b" if sig["gap"] >= 0 else "#c62828"
-        gap_arrow = "▲" if sig["gap"] >= 0 else "▼"
+        # 상단 핵심 표시: 불일치 여부 우선, 없으면 gap
+        if hlab["bear_div"]:
+            _p = hlab["bear_div_pct"]
+            if _p >= 2.0:
+                _top_label = "부정적 불일치 (위험)"
+                _top_color = "#c62828"
+            elif _p >= 0.5:
+                _top_label = "부정적 불일치 (주의)"
+                _top_color = "#ef6c00"
+            else:
+                _top_label = "초기 부정적 불일치"
+                _top_color = "#f9a825"
+            _top_arrow = "⚠"
+            _top_val   = f"{_p:.1f}%"
+        elif hlab["bull_div"]:
+            _top_color = "#26d2a0"
+            _top_arrow = "✓"
+            _top_label = "긍정적 불일치 (A/D 선행)"
+            _top_val   = f"{hlab['bull_div_pct']:.1f}%"
+        else:
+            _top_color = "#00897b" if sig["gap"] >= 0 else "#c62828"
+            _top_arrow = "▲" if sig["gap"] >= 0 else "▼"
+            _top_label = "괴리 (A/D − 가격)"
+            _top_val   = f"{sig['gap']:+.2f}%"
         st.markdown(
             f'<div style="text-align:center;padding:6px 0 2px 0">'
-            f'<span style="font-size:0.85em;color:#aaaaaa">괴리 (A/D − 가격)</span><br>'
-            f'<span style="font-size:2.6em;font-weight:900;color:{gap_color}">'
-            f'{gap_arrow} {sig["gap"]:+.2f}%</span>'
+            f'<span style="font-size:0.85em;color:#aaaaaa">{_top_label}</span><br>'
+            f'<span style="font-size:2.6em;font-weight:900;color:{_top_color}">'
+            f'{_top_arrow} {_top_val}</span>'
             f'<span style="font-size:0.8em;color:#aaaaaa;margin-left:8px">'
             f'기준: {sig["peak_label"]}</span>'
             f'</div>',
             unsafe_allow_html=True,
         )
+        # 전고점(H_a) vs 현재고점(H_b) 비교 표시
         c1, c2, c3, c4, c5 = st.columns(5)
         c1.metric("최근 날짜",
                   pd.to_datetime(str(last["date"]), format="%Y%m%d").strftime("%Y-%m-%d"))
         c2.metric(f"{market} 종가", f"{float(last['close']):,.2f}")
         c3.metric("오늘 AD 차이",   f"{int(last['ad_diff']):+,}")
-        c4.metric("가격 고점 대비", f"{sig['price_off']:.2f}%")
-        c5.metric("A/D 고점 대비",  f"{sig['ad_off']:.2f}%")
+        # 전고점(H_a) vs 현재고점(H_b) 주가/AD 비교
+        _ha_date = hlab["ha_dt"].strftime("%-m/%-d") if hasattr(hlab["ha_dt"], "strftime") else str(hlab["ha_dt"])
+        _hb_date = hlab["hb_dt"].strftime("%-m/%-d") if hasattr(hlab["hb_dt"], "strftime") else str(hlab["hb_dt"])
+        _price_chg = (hlab["hb_val"] - hlab["ha_val"]) / abs(hlab["ha_val"]) * 100
+        _ad_chg    = (hlab["hb_ad"]  - hlab["ha_ad"])  / abs(hlab["ha_ad"])  * 100
+        c4.metric(f"주가 {_ha_date}→{_hb_date}", f"{hlab['hb_val']:,.0f}",
+                  delta=f"{_price_chg:+.1f}%")
+        c5.metric(f"A/D {_ha_date}→{_hb_date}", f"{hlab['hb_ad']:,.0f}",
+                  delta=f"{_ad_chg:+.1f}%")
 
         st.markdown(
             f'<div style="background:{sig["color"]};padding:12px 18px;border-radius:8px;margin:8px 0">'
@@ -1090,6 +1152,17 @@ def main():
             elif lma < 0 and lma < pma: nhnl_verdict, trend_color = "🔴 약세 하락",     "#c62828"
             else:                       nhnl_verdict, trend_color = "🟠 약세 회복 중",   "#ef6c00"
 
+            # 마지막 수집 주 날짜 — W-FRI 레이블은 해당 주 금요일이지만
+            # 실제 수집 시점은 그 이전일 수 있으므로 오늘 기준으로 보정
+            _last_data_dt = nhnl_df["dt"].max()
+            _today_ts2 = pd.Timestamp(datetime.today().date())
+            # 실제 수집된 마지막 거래일 = min(W-FRI 날짜, 오늘)
+            _actual_last = min(_last_data_dt, _today_ts2)
+            # 해당 주 월요일
+            _actual_mon = _actual_last - pd.Timedelta(days=_actual_last.weekday())
+            _last_data_str = f"{_actual_mon.strftime('%Y/%m/%d')} ~ {_actual_last.strftime('%Y/%m/%d')}"
+            st.caption(f"📅 최종 수집 주: **{_last_data_str}** (주간 집계)")
+
             h1, h2, h3, h4 = st.columns(4)
             h1.metric("신고가 종목 수", f"{last_nh:,}")
             h2.metric("신저가 종목 수", f"{last_nl:,}")
@@ -1128,6 +1201,145 @@ def main():
                 hovertemplate="집계구간: %{customdata}<br>NH-NL: %{y:+,}<extra></extra>",
                 xaxis="x", yaxis="y2",
             ))
+
+            # ── 이번 주 NH-NL 예상치 ──────────────────────────────
+            # nhnl_daily CSV가 있으면 → 이번 주 실제 일별 누적으로 예상
+            # 없으면 → 직전 주 일평균으로 추정
+            _forecast_error = None
+            try:
+                _today = pd.Timestamp(datetime.today().date())
+                _this_mon = _today - pd.Timedelta(days=_today.weekday())
+                _this_fri = _this_mon + pd.Timedelta(days=4)
+                # 오늘이 금요일이면 예상 종점을 내일(토)로 살짝 밀어서 선이 보이게
+                _forecast_end = _this_fri + pd.Timedelta(days=1) if _today >= _this_fri else _this_fri
+
+                # 직전 주 마지막 주간값 → 점선 시작점
+                _prev_weekly = nhnl_df[nhnl_df["dt"] < _this_mon].copy().reset_index(drop=True)
+                if _prev_weekly.empty:
+                    _prev_weekly = nhnl_df.head(1).copy()
+                _last_wk_dt   = pd.Timestamp(_prev_weekly["dt"].iloc[-1])
+                _last_wk_nhnl = float(_prev_weekly["nhnl"].iloc[-1])
+
+                # 이번 주 주간행 (W-FRI = _this_fri 로 찍힌 행)
+                _this_week_row = nhnl_df[nhnl_df["dt"] == _this_fri]
+
+                # 일별 CSV 우선, 없으면 주간행 활용, 없으면 직전주 추정
+                nhnl_daily_df = st.session_state.get(f"nhnl_daily_{market}")
+                if nhnl_daily_df is not None and not nhnl_daily_df.empty:
+                    _this_week_daily = nhnl_daily_df[
+                        (nhnl_daily_df["dt"] >= _this_mon) & (nhnl_daily_df["dt"] <= _today)
+                    ].copy()
+                else:
+                    _this_week_daily = pd.DataFrame()
+
+                if not _this_week_daily.empty:
+                    # 일별 CSV 있음 → 실제 합산
+                    _days_done   = len(_this_week_daily)
+                    _current_sum = int(_this_week_daily["nhnl"].sum())
+                    _daily_avg   = _current_sum / _days_done
+                    _est_nhnl    = int(_daily_avg * 5)
+                    _today_x     = pd.Timestamp(_this_week_daily["dt"].iloc[-1])
+                    _est_label   = (f"이번 주 예상 (실제 {_days_done}일 기반)<br>"
+                                    f"현재 누적: {_current_sum:+,} → 금요일 예상: {_est_nhnl:+,}")
+                    _x_pts = [_last_wk_dt, _today_x, _this_fri]
+                    _y_pts = [_last_wk_nhnl, _current_sum, _est_nhnl]
+
+                elif not _this_week_row.empty:
+                    # 주간 CSV에 이번 주 행 있음 → 합산값 + breadth 경과일수로 예상
+                    _current_sum = int(_this_week_row["nhnl"].iloc[-1])
+                    _df_dt = pd.to_datetime(df["date"].astype(str), format="%Y%m%d")
+                    _days_done = max(int((_df_dt >= _this_mon).sum()), 1)
+                    _daily_avg = _current_sum / _days_done
+                    _est_nhnl  = int(_daily_avg * 5)
+                    _est_label = (f"이번 주 예상 ({_days_done}일 집계 기반)<br>"
+                                  f"현재 누적: {_current_sum:+,} → 금요일 예상: {_est_nhnl:+,}")
+                    _x_pts = [_last_wk_dt, _today, _this_fri]
+                    _y_pts = [_last_wk_nhnl, _current_sum, _est_nhnl]
+
+                else:
+                    # 이번 주 데이터 없음 → 직전주 일평균 추정
+                    _daily_avg   = _last_wk_nhnl / 5.0
+                    _days_done   = min(int(_today.weekday()) + 1, 5)
+                    _current_sum = int(_daily_avg * _days_done)
+                    _est_nhnl    = int(_daily_avg * 5)
+                    _est_label   = (f"이번 주 예상 (직전주 추정)<br>"
+                                    f"{_days_done}일 경과 추정: {_current_sum:+,} → 금요일: {_est_nhnl:+,}")
+                    _x_pts = [_last_wk_dt, _today, _this_fri]
+                    _y_pts = [_last_wk_nhnl, _current_sum, _est_nhnl]
+
+                # 오늘이 금요일 다음이면 확정 → 예상치 불필요
+                _this_fri_confirmed = _today > _this_fri
+                if not _this_fri_confirmed:
+                    # ── 시나리오 3개 ──────────────────────────────────
+                    # 직전 4주 일평균들로 낙관/중립/비관 계산
+                    _recent4 = _prev_weekly.tail(4)["nhnl"].values / 5.0  # 주간값 ÷ 5 = 일평균
+                    _avg_opt  = int(float(max(_recent4)) * 5)   # 낙관: 직전 4주 중 최고
+                    _avg_base = _est_nhnl                        # 중립: 현재 페이스
+                    _avg_pes  = int(float(min(_recent4)) * 5)   # 비관: 직전 4주 중 최저
+
+                    _scenarios = [
+                        # (label, est, color, dash, marker_symbol)
+                        ("🟢 낙관", _avg_opt,  "rgba(100,220,130,0.85)", "dot",    "triangle-up"),
+                        ("🟡 중립", _avg_base, "rgba(255,220,100,0.90)", "dashdot","circle"),
+                        ("🔴 비관", _avg_pes,  "rgba(255,100,100,0.80)", "dash",   "triangle-down"),
+                    ]
+                    for _slabel, _sest, _scol, _sdash, _ssym in _scenarios:
+                        # 직전 주 확정값 → 금요일 예상값 — 점선 1개
+                        fig_hl.add_trace(go.Scatter(
+                            x=[_last_wk_dt, _forecast_end],
+                            y=[_last_wk_nhnl, _sest],
+                            mode="lines+markers",
+                            line=dict(color=_scol, width=2.0, dash=_sdash),
+                            marker=dict(size=[0, 11], color=_scol, symbol=_ssym),
+                            name=f"{_slabel} {_sest:+,}",
+                            hovertemplate=(f"{_slabel}<br>금요일 예상: {_sest:+,}<extra></extra>"),
+                            xaxis="x", yaxis="y2",
+                        ))
+
+                    # 음영: 비관~낙관 범위
+                    _lo = min(_avg_pes, _avg_opt)
+                    _hi = max(_avg_pes, _avg_opt)
+                    fig_hl.add_trace(go.Scatter(
+                        x=[_last_wk_dt, _forecast_end, _forecast_end, _last_wk_dt],
+                        y=[_last_wk_nhnl, _hi, _lo, _last_wk_nhnl],
+                        fill="toself",
+                        fillcolor="rgba(255,220,100,0.06)",
+                        line=dict(color="rgba(0,0,0,0)"),
+                        showlegend=False, hoverinfo="skip",
+                        xaxis="x", yaxis="y2",
+                    ))
+
+                    # ── 3/31 저점 → 각 시나리오 예상점 지지선 ──────────
+                    # pf3는 주간(W-FRI)이라 3/31이 없음
+                    # 3/24~4/11 구간에서 NH-NL 최저 주간값 찾기
+                    _search_start = pd.Timestamp("2026-03-24")
+                    _search_end   = pd.Timestamp("2026-04-11")
+                    _search_range = pf3[(pf3["dt"] >= _search_start) & (pf3["dt"] <= _search_end)]
+                    if not _search_range.empty:
+                        _min_idx = _search_range["nhnl"].idxmin()
+                        _ref_nhnl_dt  = pd.Timestamp(pf3.loc[_min_idx, "dt"])
+                        _ref_nhnl_val = float(pf3.loc[_min_idx, "nhnl"])
+                    else:
+                        _ref_row = pf3[pf3["dt"] <= pd.Timestamp("2026-04-11")].tail(1)
+                        _ref_nhnl_dt  = pd.Timestamp(_ref_row["dt"].iloc[-1])
+                        _ref_nhnl_val = float(_ref_row["nhnl"].iloc[-1])
+                    if True:
+                        for _slabel, _sest, _scol, _sdash, _ssym in _scenarios:
+                            fig_hl.add_trace(go.Scatter(
+                                x=[_ref_nhnl_dt, _forecast_end],
+                                y=[_ref_nhnl_val, _sest],
+                                mode="lines",
+                                line=dict(color=_scol, width=1.2, dash=_sdash),
+                                showlegend=False,
+                                hovertemplate=(f"{_slabel} 지지선<br>"
+                                               f"3/31 NH-NL: {_ref_nhnl_val:+,.0f} → {_sest:+,}<extra></extra>"),
+                                xaxis="x", yaxis="y2",
+                            ))
+            except Exception as _fe:
+                _forecast_error = str(_fe)
+
+            if _forecast_error:
+                st.caption(f"⚠ 예상치 계산 오류: {_forecast_error}")
 
             # ── 추세선 헬퍼 ──────────────────────────────────────
             def _extend_line(dt1, y1, dt2, y2, ext_days=10):
@@ -1253,7 +1465,7 @@ def main():
                 # 단일 xaxis — 세로선이 도메인 0~1 전체 관통
                 xaxis=dict(
                     domain=[0, 1],
-                    range=[start_dt3, _today_ts + pd.Timedelta(days=2)],
+                    range=[start_dt3, _today_ts + pd.Timedelta(days=9)],
                     showspikes=True, spikemode="across", spikesnap="cursor",
                     spikethickness=1, spikecolor="rgba(200,200,200,0.8)", spikedash="solid",
                     tickformat="%Y/%m/%d", dtick=7*24*60*60*1000,
@@ -1267,6 +1479,12 @@ def main():
                             spikethickness=1, spikecolor="rgba(200,200,200,0.4)"),
             )
             st.plotly_chart(fig_hl, width='stretch')
+            st.caption(
+                "📌 예상선 계산 방식 — "
+                "🟢 **낙관**: 직전 4주 중 최고 주 일평균 × 5 | "
+                "🟡 **중립**: 이번 주 현재 누적 ÷ 경과일 × 5 | "
+                "🔴 **비관**: 직전 4주 중 최저 주 일평균 × 5"
+            )
 
             # 원시 데이터
             with st.expander("📋 원시 데이터 보기", expanded=False):
