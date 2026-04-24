@@ -1173,6 +1173,28 @@ def main():
             pf_idx3 = df[pd.to_datetime(df["date"].astype(str), format="%Y%m%d") >= start_dt3].copy()
             pf_idx3["dt"] = pd.to_datetime(pf_idx3["date"].astype(str), format="%Y%m%d")
 
+            # 판정 보정: 지수 방향 vs NH-NL 방향 비교
+            _idx_recent = pf_idx3.tail(20)
+            _idx_up = (len(_idx_recent) >= 2 and
+                       float(_idx_recent["close"].iloc[-1]) > float(_idx_recent["close"].iloc[0]))
+            _nhnl_up = (len(nhnl_df) >= 2 and
+                        float(nhnl_df["nhnl"].iloc[-1]) >= float(nhnl_df["nhnl"].iloc[-2]))
+            if not pd.isna(lma):
+                if _idx_up and lma > 0 and lma > pma and _nhnl_up:
+                    nhnl_verdict, trend_color = "🟢 강세 상승",          "#2e7d32"
+                elif _idx_up and lma > 0 and not _nhnl_up:
+                    nhnl_verdict, trend_color = "⚠️ 지수↑ NH-NL 약화",  "#ef6c00"
+                elif _idx_up and lma > 0:
+                    nhnl_verdict, trend_color = "🟡 강세 둔화",          "#f9a825"
+                elif not _idx_up and lma > 0 and _nhnl_up:
+                    nhnl_verdict, trend_color = "🔵 NH-NL 선행 회복",    "#1e88e5"
+                elif lma < 0 and lma < pma:
+                    nhnl_verdict, trend_color = "🔴 약세 하락",          "#c62828"
+                elif lma < 0:
+                    nhnl_verdict, trend_color = "🟠 약세 회복 중",       "#ef6c00"
+                else:
+                    nhnl_verdict, trend_color = "🟡 강세 둔화",          "#f9a825"
+
             # domain 수동 분할 — make_subplots 미사용
             # 모든 trace가 xaxis="x" 공유 → 세로선이 전체 높이 관통
             fig_hl = go.Figure()
