@@ -1167,7 +1167,6 @@ def main():
             h1.metric("신고가 종목 수", f"{last_nh:,}")
             h2.metric("신저가 종목 수", f"{last_nl:,}")
             h3.metric("NH-NL",          f"{last_nhnl:+,}")
-            h4.metric("판정",            nhnl_verdict)
 
             # 지수 같은 기간
             pf_idx3 = df[pd.to_datetime(df["date"].astype(str), format="%Y%m%d") >= start_dt3].copy()
@@ -1194,6 +1193,8 @@ def main():
                     nhnl_verdict, trend_color = "🟠 약세 회복 중",       "#ef6c00"
                 else:
                     nhnl_verdict, trend_color = "🟡 강세 둔화",          "#f9a825"
+
+            h4.metric("판정", nhnl_verdict)
 
             # domain 수동 분할 — make_subplots 미사용
             # 모든 trace가 xaxis="x" 공유 → 세로선이 전체 높이 관통
