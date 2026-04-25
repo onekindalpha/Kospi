@@ -7,27 +7,66 @@ GitHub Actions에서 매일 실행
 4) 일별 NH-NL (52주 기준)                   → data/{market}_nhnl_daily.csv
 5) 주간 NH-NL (W-FRI 집계)                  → data/{market}_nhnl.csv
 
-환경변수: KRX_AUTH_KEY
+환경변수: KRX_AUTH_KEY (KOSPI 전용, KOSDAQ은 pykrx 사용)
+
+사용법:
+  python update_breadth.py                  # 매일 실행 (오늘치 갱신)
+  python update_breadth.py --init-prices    # 최초 1회: 과거 400일치 prices 초기화
+                                            # → nhnl_daily 자동 계산 시작 가능
 """
-import os, sys
+import os, sys, argparse
 from datetime import datetime, timedelta
 from pathlib import Path
 import pandas as pd
 import requests
 
 API_BASE  = "https://data-dbg.krx.co.kr/svc/apis/sto"
-ENDPOINTS = {"KOSPI": "/stk_bydd_trd", "KOSDAQ": "/ksq_bydd_trd"}
+ENDPOINTS = {"KOSPI": "/stk_bydd_trd"}
 FDR_SYMS  = {"KOSPI": "KS11", "KOSDAQ": "KQ11"}
 DATA_DIR  = Path("data")
 DATA_DIR.mkdir(exist_ok=True)
 
 AUTH_KEY = os.environ.get("KRX_AUTH_KEY", "").strip()
 if not AUTH_KEY:
-    print("ERROR: KRX_AUTH_KEY 환경변수 없음")
-    sys.exit(1)
+    print("WARNING: KRX_AUTH_KEY 환경변수 없음 — KOSPI KRX API 사용 불가")
 
 
-# ── KRX API 호출 ──────────────────────────────────────────────
+# ── pykrx 헬퍼 (KOSDAQ용) ────────────────────────────────────
+def fetch_pykrx_breadth_day(market: str, bas_dd: str):
+    """pykrx로 하루치 브레드스 (advances/declines/unchanged) 반환"""
+    from pykrx import stock
+    mkt = "KOSDAQ" if market == "KOSDAQ" else "KOSPI"
+    df = stock.get_market_ohlcv(bas_dd, market=mkt)
+    if df is None or df.empty:
+        return None
+    chg = df["등락률"] if "등락률" in df.columns else df.get("변동률")
+    if chg is None:
+        return None
+    adv = int((chg > 0).sum())
+    dec = int((chg < 0).sum())
+    unc = int((chg == 0).sum())
+    return adv, dec, unc
+
+
+def fetch_pykrx_prices_day(market: str, bas_dd: str) -> list:
+    """pykrx로 하루치 전종목 종가 반환 → [{code, close}, ...]"""
+    from pykrx import stock
+    mkt = "KOSDAQ" if market == "KOSDAQ" else "KOSPI"
+    df = stock.get_market_ohlcv(bas_dd, market=mkt)
+    if df is None or df.empty:
+        return []
+    rows = []
+    for ticker, row in df.iterrows():
+        try:
+            close_val = float(row["종가"])
+        except Exception:
+            continue
+        if close_val > 0:
+            rows.append({"code": str(ticker), "close": close_val})
+    return rows
+
+
+# ── KRX API 호출 (KOSPI 전용) ────────────────────────────────
 def fetch_krx(market: str, bas_dd: str) -> list:
     url = API_BASE + ENDPOINTS[market]
     headers = {
@@ -62,21 +101,31 @@ def collect_breadth(market: str, start_str: str, end_str: str,
         if d.weekday() < 5:
             bas_dd = d.strftime("%Y%m%d")
             try:
-                items = fetch_krx(market, bas_dd)
-                if items:
-                    def _val(x):
-                        for key in ("CMPPREVDD_PRC", "FLUC_RT"):
-                            v = x.get(key)
-                            if v is not None:
-                                try: return float(str(v).replace(",", ""))
-                                except: pass
-                        return 0.0
-                    adv = sum(1 for x in items if _val(x) > 0)
-                    dec = sum(1 for x in items if _val(x) < 0)
-                    unc = len(items) - adv - dec
-                    rows.append({"date": int(bas_dd), "advances": adv,
-                                 "declines": dec, "unchanged": unc})
-                    print(f"  breadth {bas_dd}: +{adv} -{dec} ={unc}")
+                if market == "KOSDAQ":
+                    result = fetch_pykrx_breadth_day(market, bas_dd)
+                    if result:
+                        adv, dec, unc = result
+                        rows.append({"date": int(bas_dd), "advances": adv,
+                                     "declines": dec, "unchanged": unc})
+                        print(f"  breadth {bas_dd}: +{adv} -{dec} ={unc}")
+                    else:
+                        print(f"  breadth {bas_dd}: 데이터 없음 (휴장?)")
+                else:
+                    items = fetch_krx(market, bas_dd)
+                    if items:
+                        def _val(x):
+                            for key in ("CMPPREVDD_PRC", "FLUC_RT"):
+                                v = x.get(key)
+                                if v is not None:
+                                    try: return float(str(v).replace(",", ""))
+                                    except: pass
+                            return 0.0
+                        adv = sum(1 for x in items if _val(x) > 0)
+                        dec = sum(1 for x in items if _val(x) < 0)
+                        unc = len(items) - adv - dec
+                        rows.append({"date": int(bas_dd), "advances": adv,
+                                     "declines": dec, "unchanged": unc})
+                        print(f"  breadth {bas_dd}: +{adv} -{dec} ={unc}")
             except Exception as e:
                 print(f"  breadth {bas_dd} skip: {e}")
         d += timedelta(days=1)
@@ -104,14 +153,9 @@ def fetch_index_ohlc(market: str, start_str: str, end_str: str) -> pd.DataFrame:
 
 # ── 3+4) 전종목 종가 누적 + 일별 NH-NL 계산 ─────────────────
 def update_prices_and_nhnl(market: str, bas_dd: str):
-    """
-    bas_dd 하루치 전종목 종가를 prices CSV에 추가하고
-    252거래일치가 쌓이면 그날 NH-NL을 계산해 nhnl_daily CSV에 추가.
-    """
     prices_path = DATA_DIR / f"{market.lower()}_prices.csv"
     nhnl_d_path = DATA_DIR / f"{market.lower()}_nhnl_daily.csv"
 
-    # 이미 오늘 nhnl_daily에 있으면 스킵
     if nhnl_d_path.exists():
         _ex = pd.read_csv(nhnl_d_path)
         if int(bas_dd) in _ex["date"].values:
@@ -120,36 +164,35 @@ def update_prices_and_nhnl(market: str, bas_dd: str):
 
     # 오늘 종가 fetch
     try:
-        items = fetch_krx(market, bas_dd)
+        if market == "KOSDAQ":
+            raw_rows = fetch_pykrx_prices_day(market, bas_dd)
+            today_rows = [{"date": int(bas_dd), "code": r["code"], "close": r["close"]}
+                          for r in raw_rows if r["close"] > 0]
+        else:
+            items = fetch_krx(market, bas_dd)
+            today_rows = []
+            for item in items:
+                if not is_common_stock(item):
+                    continue
+                cd = str(item.get("ISU_SRT_CD", "") or item.get("ISU_CD", "")).strip()
+                cl = item.get("TDD_CLSPRC", "")
+                try:
+                    close_val = float(str(cl).replace(",", ""))
+                except:
+                    continue
+                if cd and close_val > 0:
+                    today_rows.append({"date": int(bas_dd), "code": cd, "close": close_val})
     except Exception as e:
         print(f"  [{market}] prices fetch 실패 {bas_dd}: {e}")
         return
 
-    if not items:
-        print(f"  [{market}] {bas_dd} 데이터 없음 (휴장일?)")
-        return
-
-    today_rows = []
-    for item in items:
-        if not is_common_stock(item):
-            continue
-        cd = str(item.get("ISU_SRT_CD", "") or item.get("ISU_CD", "")).strip()
-        cl = item.get("TDD_CLSPRC", "")
-        try:
-            close_val = float(str(cl).replace(",", ""))
-        except:
-            continue
-        if cd and close_val > 0:
-            today_rows.append({"date": int(bas_dd), "code": cd, "close": close_val})
-
     if not today_rows:
-        print(f"  [{market}] {bas_dd} 유효 종목 없음")
+        print(f"  [{market}] {bas_dd} 데이터 없음 (휴장일?)")
         return
 
     today_df = pd.DataFrame(today_rows)
     print(f"  [{market}] {bas_dd} 종목 수: {len(today_df)}")
 
-    # 기존 prices에 오늘 추가
     if prices_path.exists():
         prices = pd.read_csv(prices_path)
         prices = prices[prices["date"] != int(bas_dd)]
@@ -160,17 +203,14 @@ def update_prices_and_nhnl(market: str, bas_dd: str):
     prices = prices.sort_values(["code", "date"]).reset_index(drop=True)
     prices.to_csv(prices_path, index=False)
 
-    # NH-NL 계산: 252거래일치 있는 종목만
     dates_avail = sorted(prices["date"].unique())
     if len(dates_avail) < 252:
         print(f"  [{market}] 누적 {len(dates_avail)}일 — 252일 미만, NH-NL 계산 보류")
         return
 
-    # 오늘 기준 직전 252 거래일
     ref_dates = dates_avail[-252:]
     panel = prices[prices["date"].isin(ref_dates)].copy()
 
-    # 종목별 252일 모두 있는 것만
     cnt = panel.groupby("code")["date"].count()
     valid_codes = cnt[cnt >= 252].index
     panel = panel[panel["code"].isin(valid_codes)]
@@ -179,7 +219,6 @@ def update_prices_and_nhnl(market: str, bas_dd: str):
         print(f"  [{market}] 유효 종목 없어 NH-NL 스킵")
         return
 
-    # 직전 251일 기준 최고/최저 → 오늘 종가와 비교
     prev_dates = ref_dates[:-1]
     prev_panel = panel[panel["date"].isin(prev_dates)]
     prev_high = prev_panel.groupby("code")["close"].max()
@@ -227,7 +266,6 @@ def rebuild_weekly_nhnl(market: str):
     weekly = weekly[["date", "dt", "new_highs", "new_lows", "nhnl"]]
     weekly = weekly.sort_values("date").reset_index(drop=True)
 
-    # 기존 주간 CSV가 있으면 병합 (daily 재계산분이 없는 오래된 주는 old 유지)
     if nhnl_w_path.exists():
         old_w = pd.read_csv(nhnl_w_path)
         daily_dates_weekly = set(weekly["date"].values)
@@ -239,6 +277,118 @@ def rebuild_weekly_nhnl(market: str):
     print(f"  [{market}] nhnl 주간 재집계 저장 ({len(weekly)}행)")
 
 
+# ── 과거 prices 초기화 (최초 1회 실행용) ────────────────────────
+def init_prices_bulk(market: str, days: int = 420):
+    prices_path = DATA_DIR / f"{market.lower()}_prices.csv"
+    nhnl_d_path = DATA_DIR / f"{market.lower()}_nhnl_daily.csv"
+
+    today = datetime.today()
+    if prices_path.exists():
+        existing = pd.read_csv(prices_path)
+        last_date = int(existing["date"].max())
+        start_dt = datetime.strptime(str(last_date), "%Y%m%d") + timedelta(days=1)
+        print(f"[{market}] prices 이어받기: {start_dt.strftime('%Y%m%d')} ~")
+    else:
+        start_dt = today - timedelta(days=days)
+        existing = None
+        print(f"[{market}] prices 초기 수집: {start_dt.strftime('%Y%m%d')} ~ {today.strftime('%Y%m%d')} ({days}일)")
+
+    all_rows = []
+    d = start_dt
+    total_days = 0
+    while d <= today:
+        if d.weekday() < 5:
+            bas_dd = d.strftime("%Y%m%d")
+            try:
+                if market == "KOSDAQ":
+                    raw_rows = fetch_pykrx_prices_day(market, bas_dd)
+                    day_rows = [{"date": int(bas_dd), "code": r["code"], "close": r["close"]}
+                                for r in raw_rows if r["close"] > 0]
+                else:
+                    items = fetch_krx(market, bas_dd)
+                    day_rows = []
+                    if items:
+                        for item in items:
+                            if not is_common_stock(item):
+                                continue
+                            cd = str(item.get("ISU_SRT_CD", "") or item.get("ISU_CD", "")).strip()
+                            cl = item.get("TDD_CLSPRC", "")
+                            try:
+                                close_val = float(str(cl).replace(",", ""))
+                            except:
+                                continue
+                            if cd and close_val > 0:
+                                day_rows.append({"date": int(bas_dd), "code": cd, "close": close_val})
+
+                if day_rows:
+                    all_rows.extend(day_rows)
+                    total_days += 1
+                    print(f"  {bas_dd}: {len(day_rows)}종목")
+                else:
+                    print(f"  {bas_dd}: 데이터 없음 (휴장?)")
+            except Exception as e:
+                print(f"  {bas_dd}: 오류 {e}")
+        d += timedelta(days=1)
+
+    if not all_rows:
+        print(f"[{market}] 수집 데이터 없음")
+        return
+
+    new_prices = pd.DataFrame(all_rows)
+    if existing is not None:
+        prices = pd.concat([existing, new_prices], ignore_index=True)
+        prices = prices.drop_duplicates(["date", "code"]).sort_values(["code", "date"]).reset_index(drop=True)
+    else:
+        prices = new_prices.sort_values(["code", "date"]).reset_index(drop=True)
+
+    prices.to_csv(prices_path, index=False)
+    print(f"[{market}] prices 저장: {len(prices)}행 ({total_days}거래일)")
+
+    dates_avail = sorted(prices["date"].unique())
+    print(f"[{market}] 누적 거래일: {len(dates_avail)}일")
+    if len(dates_avail) < 252:
+        print(f"[{market}] 252일 미만 → NH-NL 계산 불가. 더 많은 데이터 필요.")
+        return
+
+    print(f"[{market}] NH-NL 일별 계산 시작...")
+    nhnl_rows = []
+    calc_dates = dates_avail[251:]
+    for bas_dd_int in calc_dates:
+        bas_dd = str(bas_dd_int)
+        idx_pos = dates_avail.index(bas_dd_int)
+        ref_dates = dates_avail[max(0, idx_pos - 251): idx_pos + 1]
+        if len(ref_dates) < 252:
+            continue
+        panel = prices[prices["date"].isin(ref_dates)].copy()
+        cnt = panel.groupby("code")["date"].count()
+        valid_codes = cnt[cnt >= 252].index
+        panel = panel[panel["code"].isin(valid_codes)]
+        if panel.empty:
+            continue
+        prev_dates = ref_dates[:-1]
+        prev_panel = panel[panel["date"].isin(prev_dates)]
+        prev_high = prev_panel.groupby("code")["close"].max()
+        prev_low  = prev_panel.groupby("code")["close"].min()
+        today_close = panel[panel["date"] == bas_dd_int].set_index("code")["close"]
+        today_close = today_close[today_close.index.isin(valid_codes)]
+        nh = int((today_close > prev_high.reindex(today_close.index)).fillna(False).sum())
+        nl = int((today_close < prev_low.reindex(today_close.index)).fillna(False).sum())
+        nhnl = nh - nl
+        nhnl_rows.append({"date": bas_dd_int, "new_highs": nh, "new_lows": nl, "nhnl": nhnl})
+        print(f"  NH-NL {bas_dd}: NH={nh} NL={nl} NHNL={nhnl:+}")
+
+    if nhnl_rows:
+        nhnl_daily = pd.DataFrame(nhnl_rows).sort_values("date").reset_index(drop=True)
+        if nhnl_d_path.exists():
+            old_nd = pd.read_csv(nhnl_d_path)
+            new_dates = set(nhnl_daily["date"].values)
+            old_nd = old_nd[~old_nd["date"].isin(new_dates)]
+            nhnl_daily = pd.concat([old_nd, nhnl_daily], ignore_index=True).sort_values("date").reset_index(drop=True)
+        nhnl_daily.to_csv(nhnl_d_path, index=False)
+        print(f"[{market}] nhnl_daily 저장: {len(nhnl_daily)}행")
+        rebuild_weekly_nhnl(market)
+
+
 # ── main ──────────────────────────────────────────────────────
 def main():
     today   = datetime.today()
@@ -248,7 +398,6 @@ def main():
         print(f"\n{'='*40}")
         print(f"[{market}] 처리 시작")
 
-        # ── breadth ──
         csv_path = DATA_DIR / f"{market.lower()}_breadth.csv"
         idx_path = DATA_DIR / f"{market.lower()}_index.csv"
 
@@ -276,7 +425,6 @@ def main():
                 combined.to_csv(csv_path, index=False)
                 print(f"[{market}] breadth CSV 저장 ({len(combined)}행)")
 
-        # ── index OHLC ──
         if start_str <= end_str:
             idx_new = fetch_index_ohlc(market, start_str, end_str)
             if not idx_new.empty:
@@ -289,18 +437,31 @@ def main():
                 idx_combined.to_csv(idx_path, index=False)
                 print(f"[{market}] index CSV 저장 ({len(idx_combined)}행)")
 
-        # ── prices + nhnl_daily ──
-        # 오늘 포함 최근 3거래일 시도 (장마감 전 실행 시 어제치라도 수집)
         for offset in range(3):
             _d = today - timedelta(days=offset)
             if _d.weekday() < 5:
                 update_prices_and_nhnl(market, _d.strftime("%Y%m%d"))
 
-        # ── 주간 NH-NL 재집계 ──
         rebuild_weekly_nhnl(market)
 
     print("\n완료")
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description="KOSPI/KOSDAQ breadth + NH-NL 수집")
+    parser.add_argument("--init-prices", action="store_true",
+                        help="과거 400일치 prices 초기화 (최초 1회, 시간 소요)")
+    parser.add_argument("--days", type=int, default=420,
+                        help="init-prices 수집 기간 (기본 420일)")
+    args = parser.parse_args()
+
+    if args.init_prices:
+        print("=== prices 초기화 모드 ===")
+        print(f"  {args.days}일치 수집 → nhnl_daily 자동 계산")
+        for market in ["KOSPI", "KOSDAQ"]:
+            print(f"\n{'='*40}")
+            print(f"[{market}] prices 초기화 시작")
+            init_prices_bulk(market, days=args.days)
+        print("\n초기화 완료")
+    else:
+        main()
