@@ -350,11 +350,14 @@ def load_from_github(market: str) -> pd.DataFrame:
     breadth = pd.read_csv(io.StringIO(resp_b.text), dtype={"date": str})
 
     resp_i = _req.get(i_url, timeout=15)
-    if resp_i.status_code != 200:
-        raise RuntimeError(f"GitHub index CSV 없음 ({resp_i.status_code})\n{i_url}\n→ 로컬에서 update_and_push.sh 실행 후 push 해주세요.")
-    idx = pd.read_csv(io.StringIO(resp_i.text), dtype={"date": str})
+    if resp_i.status_code == 200:
+        idx = pd.read_csv(io.StringIO(resp_i.text), dtype={"date": str})
+        avail_cols = [c for c in ["date","open","high","low","close"] if c in idx.columns]
+        df = breadth.merge(idx[avail_cols], on="date", how="left")
+    else:
+        # index CSV 없음 → breadth만 사용 (지수 그래프 없이 NH-NL만 표시)
+        df = breadth.copy()
 
-    df = breadth.merge(idx[["date","open","high","low","close"]], on="date", how="inner")
     df = df.sort_values("date").reset_index(drop=True)
     return df
 
@@ -636,6 +639,23 @@ def make_plotly_chart(df: pd.DataFrame, market: str, sig: dict,
         xaxis="x", yaxis="y2",
     ))
 
+    # ── 아래 패널: 가격을 A/D 스케일로 매핑 (Pine: priceMapped)
+    _close = pf["close"].astype(float)
+    _price_min = float(_close.min())
+    _price_max = float(_close.max())
+    _ad_min_pf = float(ad_vals.min())
+    _ad_max_pf = float(ad_vals.max())
+    if _price_max != _price_min:
+        _price_mapped = _ad_min_pf + (_close - _price_min) / (_price_max - _price_min) * (_ad_max_pf - _ad_min_pf)
+    else:
+        _price_mapped = ad_vals
+    fig.add_trace(go.Scatter(
+        x=pf["dt"], y=_price_mapped,
+        line=dict(color="rgba(180,180,180,0.5)", width=1.0), name="Price (scaled)",
+        hoverinfo="skip",
+        xaxis="x", yaxis="y2",
+    ))
+
     # 위 패널 수평선 (yref="y1") — 레이블 왼쪽에 표시
     for val, color, dash, ann in [
         (hlab["hb_val"], hb_color, "dash", f"H_b {hlab['hb_val']:,.0f}"),
@@ -664,17 +684,57 @@ def make_plotly_chart(df: pd.DataFrame, market: str, sig: dict,
                            text=ann, font=dict(color=color, size=9),
                            xanchor="right", showarrow=False)
 
-    # 불일치 연결선 (퍼센트 표시는 타이틀에 이미 있으므로 제거)
-    if hlab["bear_div"]:
-        fig.add_shape(type="line",
-            x0=hlab["ha_dt"], y0=hlab["ha_ad"], x1=hlab["hb_dt"], y1=hlab["hb_ad"],
-            xref="x", yref="y2",
-            line=dict(color="rgba(255,80,80,0.9)", width=2, dash="dash"))
-    if hlab["bull_div"]:
-        fig.add_shape(type="line",
-            x0=hlab["la_dt"], y0=hlab["la_ad"], x1=hlab["lb_dt"], y1=hlab["lb_ad"],
-            xref="x", yref="y2",
-            line=dict(color="rgba(38,210,160,0.9)", width=2, dash="dash"))
+    # ── Pine 라벨: H_a/H_b/L_a/L_b 포인트에 라벨 + 연결 대시선
+    # H_a 라벨 (아래 패널 A/D 위치)
+    fig.add_annotation(
+        x=hlab["ha_dt"], y=hlab["ha_ad"], xref="x", yref="y2",
+        text=f"H_a<br>{hlab['ha_val']:,.0f}",
+        showarrow=True, arrowhead=2, ax=0, ay=-25,
+        font=dict(color=ha_color, size=10),
+        bgcolor="rgba(60,60,60,0.8)", bordercolor=ha_color, borderwidth=1,
+    )
+    fig.add_annotation(
+        x=hlab["hb_dt"], y=hlab["hb_ad"], xref="x", yref="y2",
+        text=f"H_b<br>{hlab['hb_val']:,.0f}",
+        showarrow=True, arrowhead=2, ax=0, ay=-25,
+        font=dict(color=hb_color, size=10),
+        bgcolor="rgba(60,60,60,0.8)", bordercolor=hb_color, borderwidth=1,
+    )
+    fig.add_annotation(
+        x=hlab["la_dt"], y=hlab["la_ad"], xref="x", yref="y2",
+        text=f"L_a<br>{hlab['la_val']:,.0f}",
+        showarrow=True, arrowhead=2, ax=0, ay=25,
+        font=dict(color=la_color, size=10),
+        bgcolor="rgba(60,60,60,0.8)", bordercolor=la_color, borderwidth=1,
+    )
+    fig.add_annotation(
+        x=hlab["lb_dt"], y=hlab["lb_ad"], xref="x", yref="y2",
+        text=f"L_b<br>{hlab['lb_val']:,.0f}",
+        showarrow=True, arrowhead=2, ax=0, ay=25,
+        font=dict(color=lb_color, size=10),
+        bgcolor="rgba(60,60,60,0.8)", bordercolor=lb_color, borderwidth=1,
+    )
+    # 연결 대시선 (항상 표시, 불일치 시 강조색)
+    fig.add_shape(type="line",
+        x0=hlab["ha_dt"], y0=hlab["ha_ad"], x1=hlab["hb_dt"], y1=hlab["hb_ad"],
+        xref="x", yref="y2",
+        line=dict(color=hb_color, width=2, dash="dash"))
+    fig.add_shape(type="line",
+        x0=hlab["la_dt"], y0=hlab["la_ad"], x1=hlab["lb_dt"], y1=hlab["lb_ad"],
+        xref="x", yref="y2",
+        line=dict(color=lb_color, width=2, dash="dash"))
+
+    # ── Pine: 맨 오른쪽 끝 판정 라벨
+    _last_dt  = pf["dt"].iloc[-1]
+    _last_ad  = float(ad_vals.iloc[-1])
+    fig.add_annotation(
+        x=_last_dt, y=_last_ad, xref="x", yref="y2",
+        text=f"{div_text}",
+        showarrow=False, xanchor="left",
+        font=dict(color="white", size=11),
+        bgcolor=div_color, bordercolor=div_color, borderwidth=1,
+        xshift=8,
+    )
 
     # A/D 데이터 lookup: ISO 날짜문자열 → float (JS 자석선에 사용)
     ad_lookup = {
@@ -754,8 +814,8 @@ def main():
         st.subheader("분석 파라미터")
         lookback     = st.slider("Lookback (일)",      20, 252, 126)
         chart_months = st.slider("차트 표시 기간 (월)", 1,  24,  6)
-        high_bars    = st.slider("고점 탐색 구간 H_b (일)", 10, 500, 60)
-        low_bars     = st.slider("저점 탐색 구간 L_b (일)", 10, 500, 130)
+        high_bars    = st.slider("고점 탐색 구간 H_b (일)", 10, 500, 30)
+        low_bars     = st.slider("저점 탐색 구간 L_b (일)", 10, 500, 30)
         with st.expander("임계값 세부 설정"):
             price_thr  = st.number_input("가격 고점 근접 기준 %", value=2.0,  step=0.1)
             ad_thr     = st.number_input("A/D 고점 근접 기준 %",  value=3.0,  step=0.1)
@@ -890,66 +950,57 @@ def main():
     # TAB 1: 기존 A/D Line 분석
     # ══════════════════════════════════════════════
     if active_tab == "📈 A/D Line":
-        # 상단 핵심 표시: 불일치 여부 우선, 없으면 gap
-        if hlab["bear_div"]:
-            _p = hlab["bear_div_pct"]
-            if _p >= 2.0:
-                _top_label = "부정적 불일치 (위험)"
-                _top_color = "#c62828"
-            elif _p >= 0.5:
-                _top_label = "부정적 불일치 (주의)"
-                _top_color = "#ef6c00"
-            else:
-                _top_label = "초기 부정적 불일치"
-                _top_color = "#f9a825"
-            _top_arrow = "⚠"
-            _top_val   = f"{_p:.1f}%"
-        elif hlab["bull_div"]:
-            _top_color = "#26d2a0"
-            _top_arrow = "✓"
-            _top_label = "긍정적 불일치 (A/D 선행)"
-            _top_val   = f"{hlab['bull_div_pct']:.1f}%"
-        else:
-            _top_color = "#00897b" if sig["gap"] >= 0 else "#c62828"
-            _top_arrow = "▲" if sig["gap"] >= 0 else "▼"
-            _top_label = "괴리 (A/D − 가격)"
-            _top_val   = f"{sig['gap']:+.2f}%"
-        st.markdown(
-            f'<div style="text-align:center;padding:6px 0 2px 0">'
-            f'<span style="font-size:0.85em;color:#aaaaaa">{_top_label}</span><br>'
-            f'<span style="font-size:2.6em;font-weight:900;color:{_top_color}">'
-            f'{_top_arrow} {_top_val}</span>'
-            f'<span style="font-size:0.8em;color:#aaaaaa;margin-left:8px">'
-            f'기준: {sig["peak_label"]}</span>'
-            f'</div>',
-            unsafe_allow_html=True,
-        )
-        # 전고점(H_a) vs 현재고점(H_b) 비교 표시
-        c1, c2, c3, c4, c5 = st.columns(5)
-        c1.metric("최근 날짜",
-                  pd.to_datetime(str(last["date"]), format="%Y%m%d").strftime("%Y-%m-%d"))
-        c2.metric(f"{market} 종가", f"{float(last['close']):,.2f}")
-        c3.metric("오늘 AD 차이",   f"{int(last['ad_diff']):+,}")
-        # 전고점(H_a) vs 현재고점(H_b) 주가/AD 비교
+        # ── Pine 테이블 그대로 재현 ──────────────────────────────
         _ha_date = hlab["ha_dt"].strftime("%-m/%-d") if hasattr(hlab["ha_dt"], "strftime") else str(hlab["ha_dt"])
         _hb_date = hlab["hb_dt"].strftime("%-m/%-d") if hasattr(hlab["hb_dt"], "strftime") else str(hlab["hb_dt"])
-        _price_chg = (hlab["hb_val"] - hlab["ha_val"]) / abs(hlab["ha_val"]) * 100
-        _ad_chg    = (hlab["hb_ad"]  - hlab["ha_ad"])  / abs(hlab["ha_ad"])  * 100
-        c4.metric(f"주가 {_ha_date}→{_hb_date}", f"{hlab['hb_val']:,.2f}",
-                  delta=f"{_price_chg:+.2f}%",
-                  help=f"H_a({_ha_date}) 주가 대비 H_b({_hb_date}) 주가 변화율.\nH_a={hlab['ha_val']:,.2f} → H_b={hlab['hb_val']:,.2f}")
-        c5.metric(f"A/D {_ha_date}→{_hb_date}", f"{hlab['hb_ad']:,.0f}",
-                  delta=f"{_ad_chg:+.2f}%",
-                  help=f"H_a({_ha_date}) 시점 A/D Line 대비 H_b({_hb_date}) 시점 A/D 변화율.\nH_a A/D={hlab['ha_ad']:,.0f} → H_b A/D={hlab['hb_ad']:,.0f}")
+        _la_date = hlab["la_dt"].strftime("%-m/%-d") if hasattr(hlab["la_dt"], "strftime") else str(hlab["la_dt"])
+        _lb_date = hlab["lb_dt"].strftime("%-m/%-d") if hasattr(hlab["lb_dt"], "strftime") else str(hlab["lb_dt"])
 
+        # 판정 (Pine 로직 동일)
+        _bear = hlab["bear_div"]
+        _bull = hlab["bull_div"]
+        _bdp  = hlab["bear_div_pct"]
+        _bup  = hlab["bull_div_pct"]
+        if _bear and _bdp >= 2.0:
+            _status = "🔴 부정적 불일치 (위험)"
+            _note   = f"H_b 신고점 / A/D {_bdp:.2f}% 뒤처짐"
+            _scolor = "#c62828"
+        elif _bear and _bdp >= 0.5:
+            _status = "🟠 부정적 불일치 (주의)"
+            _note   = f"H_b 신고점 / A/D {_bdp:.2f}% 뒤처짐"
+            _scolor = "#ef6c00"
+        elif _bear:
+            _status = "🟡 초기 부정적 불일치"
+            _note   = "H_b 신고점 / A/D 소폭 뒤처짐"
+            _scolor = "#f9a825"
+        elif _bull and _bup >= 0.5:
+            _status = "🟢 긍정적 불일치 (바닥 신호)"
+            _note   = f"L_b 신저점 / A/D {_bup:.2f}% 더 올라옴"
+            _scolor = "#26d2a0"
+        elif _bull:
+            _status = "🔵 초기 긍정적 불일치"
+            _note   = "L_b 신저점 / A/D 소폭 상승"
+            _scolor = "#1565c0"
+        else:
+            _status = "중립"
+            _note   = "불일치 없음"
+            _scolor = "#757575"
+
+        # 상단 판정 배너
         st.markdown(
-            f'<div style="background:{sig["color"]};padding:12px 18px;border-radius:8px;margin:8px 0">'
-            f'<b style="font-size:1.2em;color:white">{sig["verdict"]}</b>'
-            f'&nbsp;&nbsp;<span style="color:#ffffffcc">{sig["note"]}</span>'
-            f'&nbsp;&nbsp;<span style="color:#ffffffaa;font-size:0.9em">기준: {sig["peak_label"]}</span>'
+            f'<div style="background:{_scolor};padding:12px 18px;border-radius:8px;margin:4px 0 8px 0">'
+            f'<b style="font-size:1.2em;color:white">{_status}</b>'
+            f'&nbsp;&nbsp;<span style="color:#ffffffcc">{_note}</span>'
             f'</div>',
             unsafe_allow_html=True,
         )
+
+        # 상단 metrics: 최근날짜 / 종가 / 오늘 AD차이
+        c1, c2, c3 = st.columns(3)
+        c1.metric("최근 날짜", pd.to_datetime(str(last["date"]), format="%Y%m%d").strftime("%Y-%m-%d"))
+        c2.metric(f"{market} 종가", f"{float(last['close']):,.2f}")
+        c3.metric("오늘 A/D 차이", f"{int(last['ad_diff']):+,}")
+
         try:
             fig_main, ad_lookup = make_plotly_chart(df, market, sig, chart_months, hlab)
 
@@ -1037,6 +1088,35 @@ def main():
 
         except Exception as e:
             st.error(f"차트 렌더링 실패: {e}")
+
+        # Pine 테이블 재현: 차트 아래
+        st.markdown("---")
+        _ad_hb_flag = "  ⚠" if _bear else "  ✓"
+        _ad_lb_flag = "  ⚠" if _bull else "  ✓"
+        col_h, col_l = st.columns(2)
+        with col_h:
+            st.markdown(f"""
+| 항목 | 값 |
+|---|---|
+| H_a 예전 고점 ({_ha_date}) | {hlab['ha_val']:,.2f} |
+| A/D @ H_a | {hlab['ha_ad']:,.0f} |
+| H_b 최근 고점 ({_hb_date}) | {hlab['hb_val']:,.2f} |
+| A/D @ H_b | {hlab['hb_ad']:,.0f}{_ad_hb_flag} |
+| A/D 괴리 % | {_bdp:.2f}% |
+| 판정 | {_status} |
+""")
+        with col_l:
+            st.markdown(f"""
+| 항목 | 값 |
+|---|---|
+| L_a 예전 저점 ({_la_date}) | {hlab['la_val']:,.2f} |
+| A/D @ L_a | {hlab['la_ad']:,.0f} |
+| L_b 최근 저점 ({_lb_date}) | {hlab['lb_val']:,.2f} |
+| A/D @ L_b | {hlab['lb_ad']:,.0f}{_ad_lb_flag} |
+| A/D 괴리 % | {_bup:.2f}% |
+| 판정 | {_status} |
+""")
+        st.markdown("---")
 
         with st.expander("📋 원시 데이터 보기"):
             show = df.copy()
@@ -1195,14 +1275,17 @@ def main():
             h3.metric("NH-NL",          f"{last_nhnl:+,}", help=f"출처: {_nh_label}")
 
             # 지수 같은 기간
+            _has_index = all(c in df.columns for c in ["close", "high", "low"])
             pf_idx3 = df[pd.to_datetime(df["date"].astype(str), format="%Y%m%d") >= start_dt3].copy()
             pf_idx3["dt"] = pd.to_datetime(pf_idx3["date"].astype(str), format="%Y%m%d")
+            if _has_index:
+                pf_idx3 = pf_idx3.dropna(subset=["close"])
 
             # 판정 보정: 지수 방향 vs NH-NL 방향 + Pine 기준 ±200 임계값
             # Pine script 기준: |nhnl| > 200 = 강한 신호, 0~200 = 보통
             _STRONG = 200  # Pine script 임계값
             _idx_recent = pf_idx3.tail(20)
-            _idx_up = (len(_idx_recent) >= 2 and
+            _idx_up = (_has_index and len(_idx_recent) >= 2 and
                        float(_idx_recent["close"].iloc[-1]) > float(_idx_recent["close"].iloc[0]))
             _nhnl_up = (len(nhnl_df) >= 2 and
                         float(nhnl_df["nhnl"].iloc[-1]) >= float(nhnl_df["nhnl"].iloc[-2]))
@@ -1251,12 +1334,19 @@ def main():
             fig_hl = go.Figure()
 
             # 위 패널: 지수 곡선 (yaxis="y1", domain 0.45~1.0)
-            fig_hl.add_trace(go.Scatter(
-                x=pf_idx3["dt"], y=pf_idx3["close"],
-                line=dict(color="rgba(200,200,200,0.9)", width=1.8),
-                name=f"{market} 지수",
-                xaxis="x", yaxis="y1",
-            ))
+            if _has_index and not pf_idx3.empty:
+                fig_hl.add_trace(go.Scatter(
+                    x=pf_idx3["dt"], y=pf_idx3["close"],
+                    line=dict(color="rgba(200,200,200,0.9)", width=1.8),
+                    name=f"{market} 지수",
+                    xaxis="x", yaxis="y1",
+                ))
+            else:
+                fig_hl.add_trace(go.Scatter(
+                    x=[], y=[],
+                    name=f"{market} 지수 (데이터 없음)",
+                    xaxis="x", yaxis="y1",
+                ))
 
             # 아래 패널: NH-NL 곡선 — hover 시 "집계 구간: M/D(월)~M/D(금)" 표시
             # W-FRI 집계: dt가 해당 주 금요일 → 월요일은 dt-4일
@@ -1268,7 +1358,9 @@ def main():
             ]
             fig_hl.add_trace(go.Scatter(
                 x=pf3["dt"], y=pf3["nhnl"].astype(float),
+                mode="lines+markers",
                 line=dict(color="#26a69a", width=1.8),
+                marker=dict(size=6, color="#26a69a", symbol="circle"),
                 name="NH-NL",
                 customdata=_week_labels,
                 hovertemplate="집계구간: %{customdata}<br>NH-NL: %{y:+,}<extra></extra>",
@@ -1434,84 +1526,112 @@ def main():
                 i = diffs.argmin()
                 return pf_idx3["dt"].iloc[i], float(pf_idx3["close"].iloc[i])
 
-            # ── 수동 추세선: 지수 + NH-NL 동시 ──
-            _manual_lines = [
-                ("2026-02-12", "2026-02-26", "rgba(255,200,50,0.95)",  10),
-                ("2026-02-26", "2026-03-19", "rgba(255,100,100,0.90)", 10),
-                ("2026-03-04", "2026-03-31", "rgba(100,200,255,0.90)", 35),
-            ]
+            def _idx_close_low_at_dt(target_dt, window=5):
+                """target_dt 근처 window일 범위에서 종가가 가장 낮은 날짜+종가 (상승추세선용)"""
+                center = pd.Timestamp(target_dt)
+                mask = (pf_idx3["dt"] >= center - pd.Timedelta(days=window)) & \
+                       (pf_idx3["dt"] <= center + pd.Timedelta(days=window))
+                sub = pf_idx3[mask]
+                if sub.empty:
+                    i = (pf_idx3["dt"] - center).abs().argmin()
+                    return pf_idx3["dt"].iloc[i], float(pf_idx3["close"].iloc[i])
+                i = sub["close"].idxmin()
+                return pf_idx3["dt"].loc[i], float(pf_idx3["close"].loc[i])
 
-            for _da, _db, _col, _ext in _manual_lines:
-                _dt_a, _y_a   = _idx_val_at_dt(_da)
-                _dt_b, _y_b   = _idx_val_at_dt(_db)
-                _, _ny_a      = _nhnl_val_at_dt(_dt_a)
-                _, _ny_b      = _nhnl_val_at_dt(_dt_b)
+            def _idx_close_high_at_dt(target_dt, window=5):
+                """target_dt 근처 window일 범위에서 종가가 가장 높은 날짜+종가 (하락추세선용)"""
+                center = pd.Timestamp(target_dt)
+                mask = (pf_idx3["dt"] >= center - pd.Timedelta(days=window)) & \
+                       (pf_idx3["dt"] <= center + pd.Timedelta(days=window))
+                sub = pf_idx3[mask]
+                if sub.empty:
+                    i = (pf_idx3["dt"] - center).abs().argmin()
+                    return pf_idx3["dt"].iloc[i], float(pf_idx3["close"].iloc[i])
+                i = sub["close"].idxmax()
+                return pf_idx3["dt"].loc[i], float(pf_idx3["close"].loc[i])
+
+            # ── 수동 추세선: 마켓별로 다르게 적용 ──
+            # (날짜A, 날짜B, 색, 연장일, 기준: "low"=상승추세선 / "high"=하락추세선, idx_only=지수패널만)
+            # 날짜는 정확한 거래일로 지정 → window=0으로 exact match
+            _manual_lines_by_market = {
+                "KOSPI": [
+                    # (날짜A, 날짜B, 색, 연장일, 기준, idx_only)
+                    ("2026-02-13", "2026-02-26", "rgba(255,200,50,0.95)",  10, "low",  False),  # 상승추세선 (저점종가)
+                    ("2026-02-26", "2026-03-18", "rgba(255,100,100,0.90)", 10, "high", False),  # 하락추세선 (고점종가)
+                    ("2026-03-04", "2026-03-31", "rgba(100,200,255,0.90)", 14, "low",  False),  # 지지선 (저점종가)
+                ],
+                "KOSDAQ": [],   # 코스닥 추세선 없음 (못 그려서 제거)
+            }
+            _manual_lines = _manual_lines_by_market.get(market, [])
+
+            def _nearest_close(target_dt):
+                """지정 날짜에 가장 가까운 거래일의 종가 반환 (탐색 없음, 정확한 날짜 사용)"""
+                center = pd.Timestamp(target_dt)
+                diffs = (pf_idx3["dt"] - center).abs()
+                i = diffs.argmin()
+                return pf_idx3["dt"].iloc[i], float(pf_idx3["close"].iloc[i])
+
+            for _da, _db, _col, _ext, _basis, _idx_only in _manual_lines:
+                if not _has_index or pf_idx3.empty:
+                    _dt_a = pd.Timestamp(_da)
+                    _dt_b = pd.Timestamp(_db)
+                    _y_a = _y_b = None
+                else:
+                    _dt_a, _y_a = _nearest_close(_da)
+                    _dt_b, _y_b = _nearest_close(_db)
+
+                _, _ny_a = _nhnl_val_at_dt(_dt_a)
+                _, _ny_b = _nhnl_val_at_dt(_dt_b)
 
                 # 위 패널: 지수 추세선 (y1)
-                _xs, _ys = _extend_line(_dt_a, _y_a, _dt_b, _y_b, ext_days=_ext)
-                fig_hl.add_trace(go.Scatter(
-                    x=_xs, y=_ys, mode="lines",
-                    line=dict(color=_col, width=2, dash="dot"),
-                    showlegend=False, xaxis="x", yaxis="y1",
-                ))
-                fig_hl.add_trace(go.Scatter(
-                    x=[_dt_a, _dt_b], y=[_y_a, _y_b],
-                    mode="markers+text",
-                    marker=dict(size=7, color=_col, symbol="circle"),
-                    text=[_dt_a.strftime("%m/%d"), _dt_b.strftime("%m/%d")],
-                    textposition=["bottom center", "bottom center"],
-                    textfont=dict(size=9, color=_col),
-                    showlegend=False, xaxis="x", yaxis="y1",
-                ))
+                if _y_a is not None and _y_b is not None:
+                    _xs, _ys = _extend_line(_dt_a, _y_a, _dt_b, _y_b, ext_days=_ext)
+                    fig_hl.add_trace(go.Scatter(
+                        x=_xs, y=_ys, mode="lines",
+                        line=dict(color=_col, width=2, dash="dot"),
+                        showlegend=False, xaxis="x", yaxis="y1",
+                    ))
+                    # 시작/끝 날짜 레이블 (선 위에 작게)
+                    fig_hl.add_annotation(x=_dt_a, y=_y_a, text=_dt_a.strftime("%m/%d"),
+                        font=dict(size=9, color=_col), showarrow=False,
+                        yshift=-14, xref="x", yref="y1")
+                    fig_hl.add_annotation(x=_dt_b, y=_y_b, text=_dt_b.strftime("%m/%d"),
+                        font=dict(size=9, color=_col), showarrow=False,
+                        yshift=-14, xref="x", yref="y1")
 
-                # 아래 패널: NH-NL 추세선 (y2)
-                if _ny_a is not None and _ny_b is not None:
+                # 아래 패널: NH-NL 추세선 (y2) — 선만, 마커/텍스트 없음
+                if not _idx_only and _ny_a is not None and _ny_b is not None:
                     _xs2, _ys2 = _extend_line(_dt_a, _ny_a, _dt_b, _ny_b, ext_days=_ext)
                     fig_hl.add_trace(go.Scatter(
                         x=_xs2, y=_ys2, mode="lines",
                         line=dict(color=_col, width=2, dash="dot"),
                         showlegend=False, xaxis="x", yaxis="y2",
                     ))
-                    fig_hl.add_trace(go.Scatter(
-                        x=[_dt_a, _dt_b], y=[_ny_a, _ny_b],
-                        mode="markers+text",
-                        marker=dict(size=7, color=_col, symbol="circle"),
-                        text=[_dt_a.strftime("%m/%d"), _dt_b.strftime("%m/%d")],
-                        textposition=["top center", "top center"],
-                        textfont=dict(size=9, color=_col),
-                        showlegend=False, xaxis="x", yaxis="y2",
-                    ))
 
-            # ── 지수 전용 상승추세선 (y1만, NH-NL 건드리지 않음) ──
-            # 3/31 저점 → 4/11 저점 이어서 받치는 초록 상승추세선
-            _up_lines_idx_only = [
-                ("2026-03-31", "2026-04-07", "rgba(100,255,150,0.90)", 21),
-            ]
+            # ── 지수 전용 상승추세선 (y1만) — 마켓별 ──
+            _up_lines_by_market = {
+                "KOSPI":  [("2026-03-31", "2026-04-07", "rgba(100,255,150,0.90)", 21)],  # 원래 있던 코스피 상승추세선
+                "KOSDAQ": [("2026-04-07", "2026-04-23", "rgba(100,255,150,0.90)", 14)],
+            }
+            _up_lines_idx_only = _up_lines_by_market.get(market, [])
+
             for _da, _db, _col, _ext in _up_lines_idx_only:
-                _dt_a, _y_a = _idx_val_at_dt(_da)
-                _dt_b, _y_b = _idx_val_at_dt(_db)
-                # 저점 기준: close 대신 low 사용
-                def _idx_low_at_dt(target_dt):
-                    diffs = (pf_idx3["dt"] - pd.Timestamp(target_dt)).abs()
-                    i = diffs.argmin()
-                    return pf_idx3["dt"].iloc[i], float(pf_idx3["low"].iloc[i])
-                _dt_a, _y_a = _idx_low_at_dt(_da)
-                _dt_b, _y_b = _idx_low_at_dt(_db)
+                if not _has_index or pf_idx3.empty:
+                    continue
+                _dt_a, _y_a = _nearest_close(_da)
+                _dt_b, _y_b = _nearest_close(_db)
                 _xs, _ys = _extend_line(_dt_a, _y_a, _dt_b, _y_b, ext_days=_ext)
                 fig_hl.add_trace(go.Scatter(
                     x=_xs, y=_ys, mode="lines",
                     line=dict(color=_col, width=2, dash="dot"),
                     showlegend=False, xaxis="x", yaxis="y1",
                 ))
-                fig_hl.add_trace(go.Scatter(
-                    x=[_dt_a, _dt_b], y=[_y_a, _y_b],
-                    mode="markers+text",
-                    marker=dict(size=7, color=_col, symbol="circle"),
-                    text=[_dt_a.strftime("%m/%d"), _dt_b.strftime("%m/%d")],
-                    textposition=["bottom center", "bottom center"],
-                    textfont=dict(size=9, color=_col),
-                    showlegend=False, xaxis="x", yaxis="y1",
-                ))
+                fig_hl.add_annotation(x=_dt_a, y=_y_a, text=_dt_a.strftime("%m/%d"),
+                    font=dict(size=9, color=_col), showarrow=False,
+                    yshift=-14, xref="x", yref="y1")
+                fig_hl.add_annotation(x=_dt_b, y=_y_b, text=_dt_b.strftime("%m/%d"),
+                    font=dict(size=9, color=_col), showarrow=False,
+                    yshift=-14, xref="x", yref="y1")
 
             # 0선 / ±500 기준선 (y2 패널)
             for _y, _color, _dash, _width in [
@@ -1559,13 +1679,23 @@ def main():
                 "🔴 **비관**: 직전 4주 중 최저 주 일평균 × 5"
             )
 
-            # 원시 데이터
+            # 원시 데이터 — 일별 우선, 없으면 주간
             with st.expander("📋 원시 데이터 보기", expanded=False):
-                display_df = pf3[["dt","new_highs","new_lows","nhnl"]].copy()
-                display_df = display_df.rename(columns={"dt":"날짜","new_highs":"신고가 수","new_lows":"신저가 수","nhnl":"NH-NL"})
-                display_df["날짜"] = display_df["날짜"].dt.strftime("%Y/%m/%d")
-                display_df = display_df.sort_values("날짜", ascending=False).reset_index(drop=True)
-                st.dataframe(display_df, use_container_width=True, height=300)
+                _nhnl_daily_raw = st.session_state.get(f"nhnl_daily_{market}")
+                if _nhnl_daily_raw is not None and not _nhnl_daily_raw.empty:
+                    _daily_disp = _nhnl_daily_raw.copy()
+                    _daily_disp["날짜"] = pd.to_datetime(_daily_disp["date"].astype(str), format="%Y%m%d").dt.strftime("%Y/%m/%d")
+                    _daily_disp = _daily_disp.rename(columns={"new_highs":"신고가 수","new_lows":"신저가 수","nhnl":"NH-NL"})
+                    _daily_disp = _daily_disp[["날짜","신고가 수","신저가 수","NH-NL"]].sort_values("날짜", ascending=False).reset_index(drop=True)
+                    st.caption("📅 일별 데이터")
+                    st.dataframe(_daily_disp, use_container_width=True, height=400)
+                else:
+                    display_df = pf3[["dt","new_highs","new_lows","nhnl"]].copy()
+                    display_df = display_df.rename(columns={"dt":"날짜","new_highs":"신고가 수","new_lows":"신저가 수","nhnl":"NH-NL"})
+                    display_df["날짜"] = display_df["날짜"].dt.strftime("%Y/%m/%d")
+                    display_df = display_df.sort_values("날짜", ascending=False).reset_index(drop=True)
+                    st.caption("📅 주간 데이터 (일별 데이터 없음)")
+                    st.dataframe(display_df, use_container_width=True, height=300)
 
 if __name__ == "__main__":
     main()
