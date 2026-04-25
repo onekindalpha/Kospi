@@ -496,47 +496,54 @@ def compute_hlab(df: pd.DataFrame, high_bars: int = 60, low_bars: int = 130) -> 
         start = max(0, end_idx - length)
         return arr[start:end_idx], start
 
-    # H_b: 최근 high_bars 구간
+    # ── Pine script v16 로직 그대로 ──────────────────────────────
+    # H_b = ta.highest(close, highBars)         → 최근 high_bars 구간 고점
+    # H_a = ta.highest(close[highBars], highBars) → highBars 이전부터 highBars 구간 고점
+    # (H_b 위치와 무관하게 항상 현재에서 high_bars 이전 시점이 기준)
+
+    # H_b: 최근 high_bars 구간 (현재 포함)
     hb_window, hb_start = _safe_slice(closes, n, high_bars)
     if len(hb_window) == 0:
-        hb_window = closes
-        hb_start  = 0
+        hb_window = closes; hb_start = 0
     hb_idx_local = int(np.argmax(hb_window))
-    hb_idx  = hb_start + hb_idx_local
-    hb_val  = closes[hb_idx]
-    hb_dt   = dts.iloc[hb_idx]
-    hb_ad   = ad_line[hb_idx]
+    hb_idx = hb_start + hb_idx_local
+    hb_val = closes[hb_idx]
+    hb_dt  = dts.iloc[hb_idx]
+    hb_ad  = ad_line[hb_idx]
 
-    # H_a: 이전 high_bars 구간 (H_b 구간 앞)
-    ha_window, ha_start = _safe_slice(closes, hb_start + hb_idx_local, high_bars)
+    # H_a: 현재에서 high_bars 이전 시점을 기준으로 high_bars 길이 탐색
+    # Pine: close[highBars] 시점부터 highBars 개 = 인덱스 (n - 2*high_bars) ~ (n - high_bars)
+    ha_end   = max(0, n - high_bars)          # high_bars 이전 시점 (exclusive end)
+    ha_window, ha_start = _safe_slice(closes, ha_end, high_bars)
     if len(ha_window) > 0:
         ha_idx_local = int(np.argmax(ha_window))
-        ha_idx  = ha_start + ha_idx_local
-        ha_val  = closes[ha_idx]
-        ha_dt   = dts.iloc[ha_idx]
-        ha_ad   = ad_line[ha_idx]
+        ha_idx = ha_start + ha_idx_local
+        ha_val = closes[ha_idx]
+        ha_dt  = dts.iloc[ha_idx]
+        ha_ad  = ad_line[ha_idx]
     else:
         ha_val, ha_dt, ha_ad, ha_idx = hb_val, hb_dt, hb_ad, hb_idx
 
-    # L_b: 최근 low_bars 구간
+    # L_b: 최근 low_bars 구간 (현재 포함)
     lb_window, lb_start = _safe_slice(closes, n, low_bars)
     if len(lb_window) == 0:
-        lb_window = closes
-        lb_start  = 0
+        lb_window = closes; lb_start = 0
     lb_idx_local = int(np.argmin(lb_window))
-    lb_idx  = lb_start + lb_idx_local
-    lb_val  = closes[lb_idx]
-    lb_dt   = dts.iloc[lb_idx]
-    lb_ad   = ad_line[lb_idx]
+    lb_idx = lb_start + lb_idx_local
+    lb_val = closes[lb_idx]
+    lb_dt  = dts.iloc[lb_idx]
+    lb_ad  = ad_line[lb_idx]
 
-    # L_a: 이전 low_bars 구간
-    la_window, la_start = _safe_slice(closes, lb_start + lb_idx_local, low_bars)
+    # L_a: 현재에서 low_bars 이전 시점을 기준으로 low_bars 길이 탐색
+    # Pine: close[lowBars] 시점부터 lowBars 개
+    la_end   = max(0, n - low_bars)
+    la_window, la_start = _safe_slice(closes, la_end, low_bars)
     if len(la_window) > 0:
         la_idx_local = int(np.argmin(la_window))
-        la_idx  = la_start + la_idx_local
-        la_val  = closes[la_idx]
-        la_dt   = dts.iloc[la_idx]
-        la_ad   = ad_line[la_idx]
+        la_idx = la_start + la_idx_local
+        la_val = closes[la_idx]
+        la_dt  = dts.iloc[la_idx]
+        la_ad  = ad_line[la_idx]
     else:
         la_val, la_dt, la_ad, la_idx = lb_val, lb_dt, lb_ad, lb_idx
 
@@ -928,10 +935,12 @@ def main():
         _hb_date = hlab["hb_dt"].strftime("%-m/%-d") if hasattr(hlab["hb_dt"], "strftime") else str(hlab["hb_dt"])
         _price_chg = (hlab["hb_val"] - hlab["ha_val"]) / abs(hlab["ha_val"]) * 100
         _ad_chg    = (hlab["hb_ad"]  - hlab["ha_ad"])  / abs(hlab["ha_ad"])  * 100
-        c4.metric(f"주가 {_ha_date}→{_hb_date}", f"{hlab['hb_val']:,.0f}",
-                  delta=f"{_price_chg:+.1f}%")
+        c4.metric(f"주가 {_ha_date}→{_hb_date}", f"{hlab['hb_val']:,.2f}",
+                  delta=f"{_price_chg:+.2f}%",
+                  help=f"H_a({_ha_date}) 주가 대비 H_b({_hb_date}) 주가 변화율.\nH_a={hlab['ha_val']:,.2f} → H_b={hlab['hb_val']:,.2f}")
         c5.metric(f"A/D {_ha_date}→{_hb_date}", f"{hlab['hb_ad']:,.0f}",
-                  delta=f"{_ad_chg:+.1f}%")
+                  delta=f"{_ad_chg:+.2f}%",
+                  help=f"H_a({_ha_date}) 시점 A/D Line 대비 H_b({_hb_date}) 시점 A/D 변화율.\nH_a A/D={hlab['ha_ad']:,.0f} → H_b A/D={hlab['hb_ad']:,.0f}")
 
         st.markdown(
             f'<div style="background:{sig["color"]};padding:12px 18px;border-radius:8px;margin:8px 0">'
@@ -1138,19 +1147,36 @@ def main():
             nma_all  = ns_all.rolling(4).mean()
             nma_plot = nma_all.iloc[(nhnl_df["dt"] >= start_dt3).values].reset_index(drop=True)
 
-            last_nhnl = int(ns_all.iloc[-1])
-            last_nh   = int(nhnl_df["new_highs"].iloc[-1])
-            last_nl   = int(nhnl_df["new_lows"].iloc[-1])
+            # ── 최신 NH-NL: nhnl_daily_df 우선, 없으면 주간 CSV 마지막행 ──
+            _nhnl_daily_local = st.session_state.get(f"nhnl_daily_{market}")
+            _today_date_int   = int(datetime.today().strftime("%Y%m%d"))
+            _nh_label = ""  # 출처 표시용
 
-            # 판정: 4주 MA 기울기
+            if _nhnl_daily_local is not None and not _nhnl_daily_local.empty:
+                # 오늘 또는 가장 최근 거래일 행 사용
+                _daily_sorted = _nhnl_daily_local.sort_values("date")
+                _last_daily   = _daily_sorted.iloc[-1]
+                last_nhnl = int(_last_daily["nhnl"])
+                last_nh   = int(_last_daily["new_highs"])
+                last_nl   = int(_last_daily["new_lows"])
+                _nh_label = f"일별 ({str(int(_last_daily['date']))[4:6]}/{str(int(_last_daily['date']))[6:8]})"
+            else:
+                # 주간 CSV 마지막행 — W-FRI 집계값
+                last_nhnl = int(ns_all.iloc[-1])
+                last_nh   = int(nhnl_df["new_highs"].iloc[-1])
+                last_nl   = int(nhnl_df["new_lows"].iloc[-1])
+                _last_wk_date = nhnl_df["dt"].iloc[-1]
+                _nh_label = f"주간({_last_wk_date.strftime('%m/%d')} 집계)"
+
+            # 판정: 4주 MA 기울기 (초기값 — 아래 보정에서 덮어씀)
             lma = nma_all.iloc[-1]; pma = nma_all.iloc[-2] if len(nma_all) >= 2 else lma
             nhnl_ma_vals = nma_all.dropna()
             slope = np.polyfit(np.arange(len(nhnl_ma_vals)), nhnl_ma_vals.values, 1)[0] if len(nhnl_ma_vals) >= 2 else 0.0
-            if pd.isna(lma):            nhnl_verdict, trend_color = "⚪ 데이터 부족",   "#757575"
-            elif lma > 0 and lma > pma: nhnl_verdict, trend_color = "🟢 강세 상승",     "#2e7d32"
-            elif lma > 0:               nhnl_verdict, trend_color = "🟡 강세 둔화",     "#f9a825"
-            elif lma < 0 and lma < pma: nhnl_verdict, trend_color = "🔴 약세 하락",     "#c62828"
-            else:                       nhnl_verdict, trend_color = "🟠 약세 회복 중",   "#ef6c00"
+            if pd.isna(lma):            nhnl_verdict, trend_color = "⚪ 부족",   "#757575"
+            elif lma > 0 and lma > pma: nhnl_verdict, trend_color = "🟢 강세",   "#2e7d32"
+            elif lma > 0:               nhnl_verdict, trend_color = "🟡 둔화",   "#f9a825"
+            elif lma < 0 and lma < pma: nhnl_verdict, trend_color = "🔴 약세",   "#c62828"
+            else:                       nhnl_verdict, trend_color = "🟠 회복중", "#ef6c00"
 
             # 마지막 수집 주 날짜 — W-FRI 레이블은 해당 주 금요일이지만
             # 실제 수집 시점은 그 이전일 수 있으므로 오늘 기준으로 보정
@@ -1161,40 +1187,64 @@ def main():
             # 해당 주 월요일
             _actual_mon = _actual_last - pd.Timedelta(days=_actual_last.weekday())
             _last_data_str = f"{_actual_mon.strftime('%Y/%m/%d')} ~ {_actual_last.strftime('%Y/%m/%d')}"
-            st.caption(f"📅 최종 수집 주: **{_last_data_str}** (주간 집계)")
+            st.caption(f"📅 최종 수집 주: **{_last_data_str}** (주간 집계) | NH-NL 출처: **{_nh_label}**")
 
             h1, h2, h3, h4 = st.columns(4)
-            h1.metric("신고가 종목 수", f"{last_nh:,}")
-            h2.metric("신저가 종목 수", f"{last_nl:,}")
-            h3.metric("NH-NL",          f"{last_nhnl:+,}")
+            h1.metric("신고가 종목 수", f"{last_nh:,}", help=f"출처: {_nh_label}")
+            h2.metric("신저가 종목 수", f"{last_nl:,}", help=f"출처: {_nh_label}")
+            h3.metric("NH-NL",          f"{last_nhnl:+,}", help=f"출처: {_nh_label}")
 
             # 지수 같은 기간
             pf_idx3 = df[pd.to_datetime(df["date"].astype(str), format="%Y%m%d") >= start_dt3].copy()
             pf_idx3["dt"] = pd.to_datetime(pf_idx3["date"].astype(str), format="%Y%m%d")
 
-            # 판정 보정: 지수 방향 vs NH-NL 방향 비교
+            # 판정 보정: 지수 방향 vs NH-NL 방향 + Pine 기준 ±200 임계값
+            # Pine script 기준: |nhnl| > 200 = 강한 신호, 0~200 = 보통
+            _STRONG = 200  # Pine script 임계값
             _idx_recent = pf_idx3.tail(20)
             _idx_up = (len(_idx_recent) >= 2 and
                        float(_idx_recent["close"].iloc[-1]) > float(_idx_recent["close"].iloc[0]))
             _nhnl_up = (len(nhnl_df) >= 2 and
                         float(nhnl_df["nhnl"].iloc[-1]) >= float(nhnl_df["nhnl"].iloc[-2]))
+            _strong_bull = last_nhnl > _STRONG   # Pine: nhnl > 200
+            _strong_bear = last_nhnl < -_STRONG  # Pine: nhnl < -200
             if not pd.isna(lma):
-                if _idx_up and lma > 0 and lma > pma and _nhnl_up:
-                    nhnl_verdict, trend_color = "🟢 강세 상승",          "#2e7d32"
+                if _idx_up and lma > 0 and _strong_bull and _nhnl_up:
+                    nhnl_verdict, trend_color = "🟢 강한상승",  "#2e7d32"   # Pine: 강한 상승 브레드스
+                elif _idx_up and lma > 0 and _nhnl_up:
+                    nhnl_verdict, trend_color = "🟢 양호",      "#43a047"   # Pine: 양호
                 elif _idx_up and lma > 0 and not _nhnl_up:
-                    nhnl_verdict, trend_color = "⚠️ 지수↑ NH-NL 약화",  "#ef6c00"
+                    nhnl_verdict, trend_color = "⚠️ 브레드스↓", "#ef6c00"   # 지수↑이지만 NH-NL 약화
                 elif _idx_up and lma > 0:
-                    nhnl_verdict, trend_color = "🟡 강세 둔화",          "#f9a825"
+                    nhnl_verdict, trend_color = "🟡 둔화중",    "#f9a825"
                 elif not _idx_up and lma > 0 and _nhnl_up:
-                    nhnl_verdict, trend_color = "🔵 NH-NL 선행 회복",    "#1e88e5"
+                    nhnl_verdict, trend_color = "🔵 선행회복",  "#1e88e5"   # NH-NL 먼저 회복
+                elif _strong_bear and lma < 0 and lma < pma:
+                    nhnl_verdict, trend_color = "🔴 강한하락",  "#b71c1c"   # Pine: 강한 하락 브레드스
                 elif lma < 0 and lma < pma:
-                    nhnl_verdict, trend_color = "🔴 약세 하락",          "#c62828"
+                    nhnl_verdict, trend_color = "🔴 약세",      "#c62828"   # Pine: 주의
                 elif lma < 0:
-                    nhnl_verdict, trend_color = "🟠 약세 회복 중",       "#ef6c00"
+                    nhnl_verdict, trend_color = "🟠 회복중",    "#ef6c00"
                 else:
-                    nhnl_verdict, trend_color = "🟡 강세 둔화",          "#f9a825"
+                    nhnl_verdict, trend_color = "🟡 혼조",      "#f9a825"   # Pine: 혼조
 
             h4.metric("판정", nhnl_verdict)
+            # 판정 기준 안내 (Pine script ±200 임계값 기준)
+            _verdict_desc = {
+                "🟢 강한상승":  "NH-NL>200, MA+, 지수↑ (강한 상승 브레드스)",
+                "🟢 양호":      "NH-NL+, MA+, 지수↑ (양호)",
+                "⚠️ 브레드스↓": "지수↑이나 NH-NL 전주 대비 감소 (약화 경고)",
+                "🟡 둔화중":    "지수↑이나 MA 상승세 약화",
+                "🔵 선행회복":  "NH-NL 회복 중, 지수 아직 하락",
+                "🔴 강한하락":  "NH-NL<-200, MA-, 지수↓ (강한 하락 브레드스)",
+                "🔴 약세":      "MA-, MA 하락 중 (주의)",
+                "🟠 회복중":    "MA- 이나 하락세 둔화",
+                "🟡 혼조":      "MA 방향 불명확 (혼조)",
+                "⚪ 부족":      "데이터 부족",
+            }
+            _desc = _verdict_desc.get(nhnl_verdict, "")
+            if _desc:
+                st.caption(f"ℹ️ {_desc} | Pine ±200 기준 적용")
 
             # domain 수동 분할 — make_subplots 미사용
             # 모든 trace가 xaxis="x" 공유 → 세로선이 전체 높이 관통
