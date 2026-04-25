@@ -32,7 +32,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install requests pandas FinanceDataReader pykrx
+          pip install requests pandas finance-datareader pykrx
 
       - name: Run update script (init-prices mode)
         if: ${{ github.event.inputs.init_prices == 'true' }}
