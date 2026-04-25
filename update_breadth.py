@@ -140,15 +140,46 @@ def collect_breadth(market: str, start_str: str, end_str: str,
 
 # ── 2) 지수 OHLC ──────────────────────────────────────────────
 def fetch_index_ohlc(market: str, start_str: str, end_str: str) -> pd.DataFrame:
+    # 1차: FinanceDataReader
     try:
         import FinanceDataReader as fdr
         raw = fdr.DataReader(FDR_SYMS[market], start_str, end_str).reset_index()
         raw.columns = [c.lower() for c in raw.columns]
         raw["date"] = pd.to_datetime(raw["date"]).dt.strftime("%Y%m%d").astype(int)
-        return raw[["date", "open", "high", "low", "close"]].dropna()
+        result = raw[["date", "open", "high", "low", "close"]].dropna()
+        if not result.empty:
+            return result
     except Exception as e:
-        print(f"  index fetch 실패: {e}")
-        return pd.DataFrame()
+        print(f"  index FDR fetch 실패: {e}")
+
+    # 2차: pykrx 백업
+    try:
+        from pykrx import stock
+        mkt = "KOSDAQ" if market == "KOSDAQ" else "KOSPI"
+        ticker = "229200" if market == "KOSDAQ" else "069500"  # KODEX KOSDAQ150 / KODEX 200 ETF
+        # pykrx get_index_ohlcv_by_date 사용
+        idx_sym = "2001" if market == "KOSDAQ" else "1001"  # KOSDAQ 종합 / KOSPI 종합
+        raw = stock.get_index_ohlcv(start_str, end_str, idx_sym).reset_index()
+        raw.columns = [c.lower() for c in raw.columns]
+        # 날짜 컬럼명: '날짜' 또는 'date'
+        date_col = "날짜" if "날짜" in raw.columns else raw.columns[0]
+        raw["date"] = pd.to_datetime(raw[date_col]).dt.strftime("%Y%m%d").astype(int)
+        col_map = {}
+        for c in raw.columns:
+            if "시가" in c: col_map[c] = "open"
+            elif "고가" in c: col_map[c] = "high"
+            elif "저가" in c: col_map[c] = "low"
+            elif "종가" in c: col_map[c] = "close"
+        raw = raw.rename(columns=col_map)
+        needed = [c for c in ["date","open","high","low","close"] if c in raw.columns]
+        result = raw[needed].dropna()
+        if not result.empty:
+            print(f"  [{market}] index pykrx 백업 성공 ({len(result)}행)")
+            return result
+    except Exception as e2:
+        print(f"  index pykrx 백업 실패: {e2}")
+
+    return pd.DataFrame()
 
 
 # ── 3+4) 전종목 종가 누적 + 일별 NH-NL 계산 ─────────────────
@@ -283,14 +314,23 @@ def init_prices_bulk(market: str, days: int = 420):
     nhnl_d_path = DATA_DIR / f"{market.lower()}_nhnl_daily.csv"
 
     today = datetime.today()
+    start_dt = today - timedelta(days=days)
+    existing = None
+
     if prices_path.exists():
         existing = pd.read_csv(prices_path)
+        n_dates = len(existing["date"].unique())
         last_date = int(existing["date"].max())
-        start_dt = datetime.strptime(str(last_date), "%Y%m%d") + timedelta(days=1)
-        print(f"[{market}] prices 이어받기: {start_dt.strftime('%Y%m%d')} ~")
+
+        if n_dates >= 252:
+            # 충분한 거래일 보유 → 마지막 날 이후만 추가 수집
+            start_dt = datetime.strptime(str(last_date), "%Y%m%d") + timedelta(days=1)
+            print(f"[{market}] prices 이어받기: {start_dt.strftime('%Y%m%d')} ~ ({n_dates}일 보유)")
+        else:
+            # 252일 미만 → 처음부터 전체 재수집
+            existing = None
+            print(f"[{market}] prices 부족 ({n_dates}일) → 처음부터 {days}일 재수집")
     else:
-        start_dt = today - timedelta(days=days)
-        existing = None
         print(f"[{market}] prices 초기 수집: {start_dt.strftime('%Y%m%d')} ~ {today.strftime('%Y%m%d')} ({days}일)")
 
     all_rows = []
@@ -300,25 +340,10 @@ def init_prices_bulk(market: str, days: int = 420):
         if d.weekday() < 5:
             bas_dd = d.strftime("%Y%m%d")
             try:
-                if market == "KOSDAQ":
-                    raw_rows = fetch_pykrx_prices_day(market, bas_dd)
-                    day_rows = [{"date": int(bas_dd), "code": r["code"], "close": r["close"]}
-                                for r in raw_rows if r["close"] > 0]
-                else:
-                    items = fetch_krx(market, bas_dd)
-                    day_rows = []
-                    if items:
-                        for item in items:
-                            if not is_common_stock(item):
-                                continue
-                            cd = str(item.get("ISU_SRT_CD", "") or item.get("ISU_CD", "")).strip()
-                            cl = item.get("TDD_CLSPRC", "")
-                            try:
-                                close_val = float(str(cl).replace(",", ""))
-                            except:
-                                continue
-                            if cd and close_val > 0:
-                                day_rows.append({"date": int(bas_dd), "code": cd, "close": close_val})
+                # KOSPI/KOSDAQ 모두 pykrx로 수집 (KRX API는 과거 대량 수집 불가)
+                raw_rows = fetch_pykrx_prices_day(market, bas_dd)
+                day_rows = [{"date": int(bas_dd), "code": r["code"], "close": r["close"]}
+                            for r in raw_rows if r["close"] > 0]
 
                 if day_rows:
                     all_rows.extend(day_rows)
