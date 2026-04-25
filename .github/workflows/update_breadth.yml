@@ -2,8 +2,17 @@ name: Update KR Breadth Data
 
 on:
   schedule:
-    - cron: "0 1 * * 1-5"
-  workflow_dispatch:
+    - cron: "0 1 * * 1-5"   # 평일 오전 10시 KST (UTC+9)
+  workflow_dispatch:          # 수동 실행 가능
+    inputs:
+      init_prices:
+        description: "과거 prices 초기화 (최초 1회, 시간 오래 걸림)"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
 
 jobs:
   update:
@@ -23,11 +32,27 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install requests pandas finance-datareader
+          pip install requests pandas FinanceDataReader pykrx
 
-      - name: Run update script
+      - name: Run update script (init-prices mode)
+        if: ${{ github.event.inputs.init_prices == 'true' }}
         env:
           KRX_AUTH_KEY: ${{ secrets.KRX_AUTH_KEY }}
         run: |
-          chmod +x update_and_push.sh
-          ./update_and_push.sh
+          echo "=== prices 초기화 모드 ==="
+          python update_breadth.py --init-prices --days 420 || true
+
+      - name: Run update script (daily mode)
+        if: ${{ github.event.inputs.init_prices != 'true' }}
+        env:
+          KRX_AUTH_KEY: ${{ secrets.KRX_AUTH_KEY }}
+        run: python update_breadth.py || true
+
+      - name: Commit and push updated CSVs
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git pull --rebase origin main
+          git add data/
+          git diff --cached --quiet || git commit -m "chore: update breadth data $(date +%Y%m%d)"
+          git push
