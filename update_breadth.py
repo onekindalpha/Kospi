@@ -66,6 +66,60 @@ def fetch_pykrx_prices_day(market: str, bas_dd: str) -> list:
     return rows
 
 
+def fetch_fdr_prices_bulk(market: str, start_str: str, end_str: str) -> pd.DataFrame:
+    """FinanceDataReader로 init-prices용 전종목 종가를 기간 단위로 수집."""
+    import FinanceDataReader as fdr
+
+    listing_market = "KOSDAQ" if market == "KOSDAQ" else "KOSPI"
+    listing = fdr.StockListing(listing_market)
+
+    code_col = "Code" if "Code" in listing.columns else "Symbol"
+    codes = listing[code_col].astype(str).str.zfill(6).dropna().unique().tolist()
+
+    start_iso = datetime.strptime(start_str, "%Y%m%d").strftime("%Y-%m-%d")
+    end_iso = datetime.strptime(end_str, "%Y%m%d").strftime("%Y-%m-%d")
+
+    print(f"[{market}] FDR prices 수집: {start_iso} ~ {end_iso}, 종목 {len(codes)}개")
+
+    rows = []
+    for i, code in enumerate(codes, 1):
+        try:
+            df = fdr.DataReader(code, start_iso, end_iso)
+            if df is None or df.empty:
+                continue
+
+            df = df.reset_index()
+            df.columns = [str(c).lower() for c in df.columns]
+
+            if "date" not in df.columns or "close" not in df.columns:
+                continue
+
+            df["date"] = pd.to_datetime(df["date"]).dt.strftime("%Y%m%d").astype(int)
+            df["code"] = code
+            df["close"] = pd.to_numeric(df["close"], errors="coerce")
+
+            sub = df[["date", "code", "close"]].dropna()
+            sub = sub[sub["close"] > 0]
+            rows.extend(sub.to_dict("records"))
+
+        except Exception as e:
+            if i <= 10 or i % 100 == 0:
+                print(f"  [{market}] FDR {code} skip: {e}")
+
+        if i % 100 == 0:
+            print(f"  [{market}] FDR progress {i}/{len(codes)}, rows={len(rows)}")
+
+    if not rows:
+        return pd.DataFrame(columns=["date", "code", "close"])
+
+    return (
+        pd.DataFrame(rows)
+        .drop_duplicates(["date", "code"])
+        .sort_values(["code", "date"])
+        .reset_index(drop=True)
+    )
+
+
 # ── KRX API 호출 (KOSPI 전용) ────────────────────────────────
 def fetch_krx(market: str, bas_dd: str) -> list:
     url = API_BASE + ENDPOINTS[market]
@@ -315,103 +369,67 @@ def init_prices_bulk(market: str, days: int = 1200):
 
     today = datetime.today()
     start_dt = today - timedelta(days=days)
-    existing = None
+    start_str = start_dt.strftime("%Y%m%d")
+    end_str = today.strftime("%Y%m%d")
 
-    if prices_path.exists():
-        existing = pd.read_csv(prices_path)
-        n_dates = len(existing["date"].unique())
-        last_date = int(existing["date"].max())
+    print(f"[{market}] prices 전체 재수집: {start_str} ~ {end_str} ({days}일)")
 
-        if n_dates >= 252:
-            # 충분한 거래일 보유 → 마지막 날 이후만 추가 수집
-            start_dt = datetime.strptime(str(last_date), "%Y%m%d") + timedelta(days=1)
-            print(f"[{market}] prices 이어받기: {start_dt.strftime('%Y%m%d')} ~ ({n_dates}일 보유)")
-        else:
-            # 252일 미만 → 처음부터 전체 재수집
-            existing = None
-            print(f"[{market}] prices 부족 ({n_dates}일) → 처음부터 {days}일 재수집")
-    else:
-        print(f"[{market}] prices 초기 수집: {start_dt.strftime('%Y%m%d')} ~ {today.strftime('%Y%m%d')} ({days}일)")
+    prices = fetch_fdr_prices_bulk(market, start_str, end_str)
 
-    all_rows = []
-    d = start_dt
-    total_days = 0
-    while d <= today:
-        if d.weekday() < 5:
-            bas_dd = d.strftime("%Y%m%d")
-            try:
-                # KOSPI/KOSDAQ 모두 pykrx로 수집 (KRX API는 과거 대량 수집 불가)
-                raw_rows = fetch_pykrx_prices_day(market, bas_dd)
-                day_rows = [{"date": int(bas_dd), "code": r["code"], "close": r["close"]}
-                            for r in raw_rows if r["close"] > 0]
-
-                if day_rows:
-                    all_rows.extend(day_rows)
-                    total_days += 1
-                    print(f"  {bas_dd}: {len(day_rows)}종목")
-                else:
-                    print(f"  {bas_dd}: 데이터 없음 (휴장?)")
-            except Exception as e:
-                print(f"  {bas_dd}: 오류 {e}")
-        d += timedelta(days=1)
-
-    if not all_rows:
+    if prices.empty:
         print(f"[{market}] 수집 데이터 없음")
         return
 
-    new_prices = pd.DataFrame(all_rows)
-    if existing is not None:
-        prices = pd.concat([existing, new_prices], ignore_index=True)
-        prices = prices.drop_duplicates(["date", "code"]).sort_values(["code", "date"]).reset_index(drop=True)
-    else:
-        prices = new_prices.sort_values(["code", "date"]).reset_index(drop=True)
-
     prices.to_csv(prices_path, index=False)
-    print(f"[{market}] prices 저장: {len(prices)}행 ({total_days}거래일)")
+    print(f"[{market}] prices 저장: {len(prices)}행, 거래일 {len(prices['date'].unique())}일")
 
     dates_avail = sorted(prices["date"].unique())
-    print(f"[{market}] 누적 거래일: {len(dates_avail)}일")
+
     if len(dates_avail) < 252:
-        print(f"[{market}] 252일 미만 → NH-NL 계산 불가. 더 많은 데이터 필요.")
+        print(f"[{market}] 252일 미만 → NH-NL 계산 불가")
         return
 
     print(f"[{market}] NH-NL 일별 계산 시작...")
     nhnl_rows = []
-    calc_dates = dates_avail[251:]
-    for bas_dd_int in calc_dates:
-        bas_dd = str(bas_dd_int)
-        idx_pos = dates_avail.index(bas_dd_int)
-        ref_dates = dates_avail[max(0, idx_pos - 251): idx_pos + 1]
-        if len(ref_dates) < 252:
-            continue
+
+    for i in range(251, len(dates_avail)):
+        bas_dd_int = dates_avail[i]
+        ref_dates = dates_avail[i-251:i+1]
+
         panel = prices[prices["date"].isin(ref_dates)].copy()
         cnt = panel.groupby("code")["date"].count()
         valid_codes = cnt[cnt >= 252].index
         panel = panel[panel["code"].isin(valid_codes)]
+
         if panel.empty:
             continue
-        prev_dates = ref_dates[:-1]
-        prev_panel = panel[panel["date"].isin(prev_dates)]
+
+        prev_panel = panel[panel["date"].isin(ref_dates[:-1])]
         prev_high = prev_panel.groupby("code")["close"].max()
-        prev_low  = prev_panel.groupby("code")["close"].min()
+        prev_low = prev_panel.groupby("code")["close"].min()
+
         today_close = panel[panel["date"] == bas_dd_int].set_index("code")["close"]
         today_close = today_close[today_close.index.isin(valid_codes)]
+
         nh = int((today_close > prev_high.reindex(today_close.index)).fillna(False).sum())
         nl = int((today_close < prev_low.reindex(today_close.index)).fillna(False).sum())
-        nhnl = nh - nl
-        nhnl_rows.append({"date": bas_dd_int, "new_highs": nh, "new_lows": nl, "nhnl": nhnl})
-        print(f"  NH-NL {bas_dd}: NH={nh} NL={nl} NHNL={nhnl:+}")
 
-    if nhnl_rows:
-        nhnl_daily = pd.DataFrame(nhnl_rows).sort_values("date").reset_index(drop=True)
-        if nhnl_d_path.exists():
-            old_nd = pd.read_csv(nhnl_d_path)
-            new_dates = set(nhnl_daily["date"].values)
-            old_nd = old_nd[~old_nd["date"].isin(new_dates)]
-            nhnl_daily = pd.concat([old_nd, nhnl_daily], ignore_index=True).sort_values("date").reset_index(drop=True)
-        nhnl_daily.to_csv(nhnl_d_path, index=False)
-        print(f"[{market}] nhnl_daily 저장: {len(nhnl_daily)}행")
-        rebuild_weekly_nhnl(market)
+        nhnl_rows.append({
+            "date": bas_dd_int,
+            "new_highs": nh,
+            "new_lows": nl,
+            "nhnl": nh - nl,
+        })
+
+    if not nhnl_rows:
+        print(f"[{market}] NH-NL 계산 결과 없음")
+        return
+
+    nhnl_daily = pd.DataFrame(nhnl_rows).sort_values("date").reset_index(drop=True)
+    nhnl_daily.to_csv(nhnl_d_path, index=False)
+    print(f"[{market}] nhnl_daily 저장: {len(nhnl_daily)}행")
+
+    rebuild_weekly_nhnl(market)
 
 
 # ── main ──────────────────────────────────────────────────────
