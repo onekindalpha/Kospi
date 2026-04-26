@@ -797,7 +797,7 @@ def make_plotly_chart(df: pd.DataFrame, market: str, sig: dict,
         title=dict(text=f"{market} — {div_text}", font=dict(size=14, color=div_color)),
         # hovermode="x": 같은 x의 모든 trace에 동시 hover → y2 spike도 위 패널 hover로 트리거됨
         hovermode="x",
-        hoverlabel=dict(bgcolor="#1e1e2e", font_color="#ffffff", font_size=12, bordercolor="#555"),
+        hoverlabel=dict(bgcolor="rgba(245,245,245,0.95)", font_color="#111111", font_size=12, bordercolor="#999999"),
         legend=dict(orientation="h", y=1.01, x=0),
         margin=dict(l=10, r=90, t=55, b=35),
         xaxis=dict(
@@ -1141,7 +1141,9 @@ def main():
         except Exception as e:
             st.error(f"차트 렌더링 실패: {e}")
 
-        # PATCH: A/D Line explanation box
+
+
+        # PATCH: A/D Line explanation box — KOSPI/KOSDAQ 공통, 표 아래 표시
         st.markdown("""
 <div style="border:1px solid #444; border-radius:10px; padding:14px 16px; margin:12px 0 14px 0; background:#111827;">
 <b>📘 A/D Line 해설</b><br><br>
@@ -1153,6 +1155,7 @@ def main():
 현재는 주가가 상승하는 만큼 A/D Line도 함께 올라오고 있어 뚜렷한 불일치는 없습니다.
 </div>
 """, unsafe_allow_html=True)
+
 
         # Pine 테이블 재현: 차트 아래
         st.markdown("---")
@@ -1816,13 +1819,13 @@ def main():
                 _one_idx_line("2026-01-21", "2026-02-25")
                 _one_idx_line("2026-02-06", "2026-02-25")
 
+
             fig_hl.update_layout(
+                hoverlabel=dict(bgcolor="rgba(245,245,245,0.96)", font_color="#111111", font_size=12, bordercolor="#999999"),
                 template="plotly_dark", height=560,
                 title=dict(text=f"{market} NH-NL — {nhnl_verdict}",
                            font=dict(size=13, color=trend_color)),
                 hovermode="x",
-                hoverlabel=dict(bgcolor="#1e1e2e", font_color="white",
-                               font_size=12, bordercolor="#444"),
                 margin=dict(l=10, r=60, t=45, b=35),
                 legend=dict(orientation="h", y=1.01),
                 # 단일 xaxis — 세로선이 도메인 0~1 전체 관통
@@ -1841,6 +1844,29 @@ def main():
                             showspikes=True, spikemode="across", spikesnap="cursor",
                             spikethickness=1, spikecolor="rgba(200,200,200,0.4)"),
             )
+            # hover 박스 글자색 문제 방지: fig_hl hover 비활성화
+            fig_hl.update_traces(hoverinfo="skip", hovertemplate=None)
+
+
+            # FINAL CLEANUP: hover 태그 유지 + 글씨 검정 고정
+            fig_hl.update_layout(
+                hovermode="closest",
+                hoverlabel=dict(
+                    bgcolor="rgba(245,245,245,0.96)",
+                    font=dict(color="#111111", size=12),
+                    bordercolor="#999999",
+                ),
+            )
+
+            for _tr in fig_hl.data:
+                _tr.update(
+                    hoverlabel=dict(
+                        bgcolor="rgba(245,245,245,0.96)",
+                        font=dict(color="#111111", size=12),
+                        bordercolor="#999999",
+                    )
+                )
+
             st.plotly_chart(fig_hl, width='stretch')
 
             # PATCH: Weinstein explanation box
