@@ -1844,25 +1844,24 @@ def main():
                             showspikes=True, spikemode="across", spikesnap="cursor",
                             spikethickness=1, spikecolor="rgba(200,200,200,0.4)"),
             )
-            # hover 박스 글자색 문제 방지: fig_hl hover 비활성화
-            fig_hl.update_traces( hovertemplate=None)
 
 
-            # FINAL HOVER FIX: hover 태그 유지 + 가독성 확정
-            # 배포 환경에서 hover 글씨색이 검정으로 안 먹는 문제가 있어,
-            # 배경을 어둡게 고정해서 흰 글씨라도 반드시 읽히게 한다.
+            # FINAL HOVER FIX: hover/legend 태그 유지 + 글씨 검정 고정
             fig_hl.update_layout(
-                hovermode="closest",
+                hovermode="x",
                 hoverlabel=dict(
-                    bgcolor="#111827",
-                    font=dict(color="#ffffff", size=13),
-                    bordercolor="#9ca3af",
+                    bgcolor="rgba(255,255,255,0.98)",
+                    font_color="#000000",
+                    font_size=13,
+                    bordercolor="#555555",
                 ),
                 legend=dict(
-                    bgcolor="#111827",
-                    bordercolor="#9ca3af",
+                    orientation="h",
+                    y=1.01,
+                    bgcolor="rgba(255,255,255,0.94)",
+                    bordercolor="#999999",
                     borderwidth=1,
-                    font=dict(color="#ffffff", size=11),
+                    font=dict(color="#000000", size=11),
                 ),
             )
 
@@ -1870,9 +1869,10 @@ def main():
                 try:
                     _tr.update(
                         hoverlabel=dict(
-                            bgcolor="#111827",
-                            font=dict(color="#ffffff", size=13),
-                            bordercolor="#9ca3af",
+                            bgcolor="rgba(255,255,255,0.98)",
+                            font_color="#000000",
+                            font_size=13,
+                            bordercolor="#555555",
                         )
                     )
                 except Exception:
