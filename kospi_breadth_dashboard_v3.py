@@ -1848,24 +1848,70 @@ def main():
             fig_hl.update_traces(hoverinfo="skip", hovertemplate=None)
 
 
-            # FINAL CLEANUP: hover 태그 유지 + 글씨 검정 고정
+            # FINAL CLEANUP: hover/legend/annotation 가독성 최종 보정
+            # - hover 태그는 유지
+            # - 태그 글씨는 검정
+            # - legend 하얀 박스 글씨도 검정
+            # - 01/21, 02/06, 02/25 라벨은 다른 날짜 라벨처럼 통일
             fig_hl.update_layout(
                 hovermode="closest",
                 hoverlabel=dict(
                     bgcolor="rgba(245,245,245,0.96)",
                     font=dict(color="#111111", size=12),
-                    bordercolor="#999999",
+                    bordercolor="#777777",
+                ),
+                legend=dict(
+                    bgcolor="rgba(245,245,245,0.92)",
+                    bordercolor="rgba(160,160,160,0.8)",
+                    borderwidth=1,
+                    font=dict(color="#111111", size=11),
                 ),
             )
 
             for _tr in fig_hl.data:
-                _tr.update(
-                    hoverlabel=dict(
-                        bgcolor="rgba(245,245,245,0.96)",
-                        font=dict(color="#111111", size=12),
-                        bordercolor="#999999",
+                try:
+                    _tr.update(
+                        hoverinfo="x+y+name",
+                        hovertemplate="<span style='color:#111111'>%{x|%Y/%m/%d}<br>%{fullData.name}: %{y:,.2f}</span><extra></extra>",
+                        hoverlabel=dict(
+                            bgcolor="rgba(245,245,245,0.96)",
+                            font=dict(color="#111111", size=12),
+                            bordercolor="#777777",
+                        ),
                     )
-                )
+                except Exception:
+                    _tr.update(
+                        hoverlabel=dict(
+                            bgcolor="rgba(245,245,245,0.96)",
+                            font=dict(color="#111111", size=12),
+                            bordercolor="#777777",
+                        )
+                    )
+
+            # 특정 날짜 라벨 스타일 통일 + 중복 제거
+            _fix_label_texts = {"01/21", "02/06", "02/25"}
+            _seen_label_texts = set()
+            _clean_annotations = []
+
+            for _ann in list(fig_hl.layout.annotations):
+                _txt = str(getattr(_ann, "text", ""))
+
+                if _txt in _fix_label_texts:
+                    if _txt in _seen_label_texts:
+                        continue
+                    _seen_label_texts.add(_txt)
+
+                    _ann.update(
+                        font=dict(size=9, color="rgba(80,255,150,0.95)"),
+                        bgcolor="rgba(0,0,0,0)",
+                        bordercolor="rgba(0,0,0,0)",
+                        borderwidth=0,
+                        showarrow=False,
+                    )
+
+                _clean_annotations.append(_ann)
+
+            fig_hl.update_layout(annotations=_clean_annotations)
 
             st.plotly_chart(fig_hl, width='stretch')
 
