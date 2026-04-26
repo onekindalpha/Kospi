@@ -1258,39 +1258,42 @@ def main():
             elif lma < 0 and lma < pma: nhnl_verdict, trend_color = "🔴 약세",   "#c62828"
             else:                       nhnl_verdict, trend_color = "🟠 회복중", "#ef6c00"
 
-            # 마지막 수집 주 날짜 — W-FRI 레이블은 해당 주 금요일이지만
-            # 실제 수집 시점은 그 이전일 수 있으므로 오늘 기준으로 보정
-            _last_data_dt = nhnl_df["dt"].max()
-            _today_ts2 = pd.Timestamp(datetime.today().date())
-            # 실제 수집된 마지막 거래일 = min(W-FRI 날짜, 오늘)
-            _actual_last = min(_last_data_dt, _today_ts2)
-            # 해당 주 월요일
-            _actual_mon = _actual_last - pd.Timedelta(days=_actual_last.weekday())
-            _last_data_str = f"{_actual_mon.strftime('%Y/%m/%d')} ~ {_actual_last.strftime('%Y/%m/%d')}"
+            # 마지막 수집 주/일 분리 표시
+            _last_week_row = nhnl_df.sort_values("dt").iloc[-1]
+            _last_week_dt = pd.Timestamp(_last_week_row["dt"])
+            _week_actual_last = min(_last_week_dt, pd.Timestamp(datetime.today().date()))
+            _week_mon = _week_actual_last - pd.Timedelta(days=_week_actual_last.weekday())
+            _last_week_range = f"{_week_mon.strftime('%Y/%m/%d')} ~ {_week_actual_last.strftime('%Y/%m/%d')}"
+
+            _wk_nh = int(_last_week_row["new_highs"])
+            _wk_nl = int(_last_week_row["new_lows"])
+            _wk_nhnl = int(_last_week_row["nhnl"])
+
             if _nhnl_daily_local is not None and not _nhnl_daily_local.empty:
-                _last_daily_dt = pd.to_datetime(str(int(_nhnl_daily_local.sort_values("date")["date"].iloc[-1])), format="%Y%m%d")
-                _last_daily_str = _last_daily_dt.strftime("%Y/%m/%d")
+                _daily_sorted2 = _nhnl_daily_local.sort_values("date")
+                _last_daily2 = _daily_sorted2.iloc[-1]
+                _daily_dt2 = pd.to_datetime(str(int(_last_daily2["date"])), format="%Y%m%d")
+                _day_nh = int(_last_daily2["new_highs"])
+                _day_nl = int(_last_daily2["new_lows"])
+                _day_nhnl = int(_last_daily2["nhnl"])
+                _last_day_str = _daily_dt2.strftime("%Y/%m/%d")
             else:
-                _last_daily_str = "일별 데이터 없음"
+                _day_nh, _day_nl, _day_nhnl = last_nh, last_nl, last_nhnl
+                _last_day_str = _nh_label.replace("일별 (", "").replace(")", "")
+
             st.markdown(
-                f"📅 최종 수집 주: **{_last_data_str}** (주간 집계)  \
-"
-                f"📆 최종 수집 일: **{_last_daily_str}** (일별 NH-NL) | NH-NL 출처: **{_nh_label}**"
+                f"📅 **최종 수집 주:** {_last_week_range}  |  "
+                f"**주간 집계:** 신고가 **{_wk_nh:,}** / 신저가 **{_wk_nl:,}** / NH-NL **{_wk_nhnl:+,}**"
+            )
+            st.markdown(
+                f"📅 **최종 수집 일:** {_last_day_str}  |  "
+                f"**일별 집계:** 신고가 **{_day_nh:,}** / 신저가 **{_day_nl:,}** / NH-NL **{_day_nhnl:+,}**"
             )
 
             h1, h2, h3, h4 = st.columns(4)
             h1.metric("신고가 종목 수", f"{last_nh:,}", help=f"출처: {_nh_label}")
             h2.metric("신저가 종목 수", f"{last_nl:,}", help=f"출처: {_nh_label}")
             h3.metric("NH-NL",          f"{last_nhnl:+,}", help=f"출처: {_nh_label}")
-
-            # 일간 판정: 최근 일별 NH-NL 전일 대비
-            _daily_verdict = "일별 데이터 없음"
-            if _nhnl_daily_local is not None and len(_nhnl_daily_local) >= 2:
-                _daily_sorted2 = _nhnl_daily_local.sort_values("date")
-                _d_last = int(_daily_sorted2["nhnl"].iloc[-1])
-                _d_prev = int(_daily_sorted2["nhnl"].iloc[-2])
-                _daily_verdict = "⚠️ 일간 브레드스↓" if _d_last < _d_prev else "🟢 일간 개선/유지"
-            st.caption(f"📌 일간 판정: **{_daily_verdict}** | 주간 판정은 아래 추세선 기준")
 
             # 지수 같은 기간
             _has_index = all(c in df.columns for c in ["close", "high", "low"])
@@ -1309,37 +1312,7 @@ def main():
                         float(nhnl_df["nhnl"].iloc[-1]) >= float(nhnl_df["nhnl"].iloc[-2]))
             _strong_bull = last_nhnl > _STRONG   # Pine: nhnl > 200
             _strong_bear = last_nhnl < -_STRONG  # Pine: nhnl < -200
-
-            # 주간 판정: KOSDAQ은 수동 상승추세선 기준으로 우선 판정
-            _weekly_trend_desc = ""
-            if market == "KOSDAQ" and _has_index and not pf_idx3.empty:
-                def _trend_nearest_close(_target_dt):
-                    _center = pd.Timestamp(_target_dt)
-                    _diffs = (pf_idx3["dt"] - _center).abs()
-                    _i = _diffs.argmin()
-                    return pf_idx3["dt"].iloc[_i], float(pf_idx3["close"].iloc[_i])
-
-                def _line_value_at(_dt_a, _y_a, _dt_b, _y_b, _target_dt):
-                    _days = max((_dt_b - _dt_a).days, 1)
-                    _slope = (_y_b - _y_a) / _days
-                    return _y_a + _slope * max((pd.Timestamp(_target_dt) - _dt_a).days, 0)
-
-                # 1차: 03/06→04/03, 2차: 04/10→04/24. 최신 주간 판정은 2차선을 우선 사용.
-                _ta1, _ya1 = _trend_nearest_close("2026-03-06")
-                _tb1, _yb1 = _trend_nearest_close("2026-04-03")
-                _ta2, _ya2 = _trend_nearest_close("2026-04-10")
-                _tb2, _yb2 = _trend_nearest_close("2026-04-24")
-                _last_idx_dt = pf_idx3["dt"].iloc[-1]
-                _last_idx_close = float(pf_idx3["close"].iloc[-1])
-                _trend_ref = _line_value_at(_ta2, _ya2, _tb2, _yb2, _last_idx_dt)
-                _trend_gap_pct = (_last_idx_close - _trend_ref) / abs(_trend_ref) * 100 if _trend_ref else 0.0
-                if _last_idx_close >= _trend_ref * 0.995:
-                    nhnl_verdict, trend_color = "🟢 주간 추세 유지", "#43a047"
-                else:
-                    nhnl_verdict, trend_color = "⚠️ 주간 추세선 이탈", "#ef6c00"
-                _weekly_trend_desc = f"상승추세선 기준: 현재 지수와 추세선 괴리 {_trend_gap_pct:+.2f}%"
-
-            if not _weekly_trend_desc and not pd.isna(lma):
+            if not pd.isna(lma):
                 if _idx_up and lma > 0 and _strong_bull and _nhnl_up:
                     nhnl_verdict, trend_color = "🟢 강한상승",  "#2e7d32"   # Pine: 강한 상승 브레드스
                 elif _idx_up and lma > 0 and _nhnl_up:
@@ -1365,8 +1338,6 @@ def main():
                 "🟢 강한상승":  "NH-NL>200, MA+, 지수↑ (강한 상승 브레드스)",
                 "🟢 양호":      "NH-NL+, MA+, 지수↑ (양호)",
                 "⚠️ 브레드스↓": "지수↑이나 NH-NL 전주 대비 감소 (약화 경고)",
-                "🟢 주간 추세 유지": "지수가 지정 상승추세선 위에 있음",
-                "⚠️ 주간 추세선 이탈": "지수가 지정 상승추세선을 하회",
                 "🟡 둔화중":    "지수↑이나 MA 상승세 약화",
                 "🔵 선행회복":  "NH-NL 회복 중, 지수 아직 하락",
                 "🔴 강한하락":  "NH-NL<-200, MA-, 지수↓ (강한 하락 브레드스)",
@@ -1377,8 +1348,7 @@ def main():
             }
             _desc = _verdict_desc.get(nhnl_verdict, "")
             if _desc:
-                _extra_desc = f" | {_weekly_trend_desc}" if _weekly_trend_desc else ""
-                st.caption(f"ℹ️ {_desc}{_extra_desc} | Pine ±200 기준 적용")
+                st.caption(f"ℹ️ {_desc} | Pine ±200 기준 적용")
 
             # domain 수동 분할 — make_subplots 미사용
             # 모든 trace가 xaxis="x" 공유 → 세로선이 전체 높이 관통
@@ -1557,135 +1527,89 @@ def main():
             if _forecast_error:
                 st.caption(f"⚠ 예상치 계산 오류: {_forecast_error}")
 
-            # ── 추세선 헬퍼 ──────────────────────────────────────
-            def _extend_line(dt1, y1, dt2, y2, ext_days=10):
-                if dt1 == dt2: return [dt1, dt2], [y1, y2]
+            # ── 수동 추세선: 사용자가 지정한 날짜/차트영역만 표시 ─────────────
+            def _extend_line(dt1, y1, dt2, y2, ext_days=7):
+                if dt1 == dt2:
+                    return [dt1, dt2], [y1, y2]
                 _slope = (y2 - y1) / max((dt2 - dt1).days, 1)
                 dt_ext = dt2 + pd.Timedelta(days=ext_days)
-                y_ext  = y2 + _slope * ext_days
+                y_ext = y2 + _slope * ext_days
                 return [dt1, dt2, dt_ext], [y1, y2, y_ext]
 
-            def _nhnl_val_at_dt(target_dt):
-                diffs = (pf3["dt"] - target_dt).abs()
-                i = diffs.argmin()
-                if diffs.iloc[i] > pd.Timedelta(days=10):
-                    return None, None
-                return pf3["dt"].iloc[i], float(pf3["nhnl"].iloc[i])
-
-            def _idx_val_at_dt(target_dt):
-                diffs = (pf_idx3["dt"] - pd.Timestamp(target_dt)).abs()
-                i = diffs.argmin()
-                return pf_idx3["dt"].iloc[i], float(pf_idx3["close"].iloc[i])
-
-            def _idx_close_low_at_dt(target_dt, window=5):
-                """target_dt 근처 window일 범위에서 종가가 가장 낮은 날짜+종가 (상승추세선용)"""
+            def _nearest_row(frame: pd.DataFrame, target_dt: str, max_days: int = 4):
+                if frame is None or frame.empty:
+                    return None
                 center = pd.Timestamp(target_dt)
-                mask = (pf_idx3["dt"] >= center - pd.Timedelta(days=window)) & \
-                       (pf_idx3["dt"] <= center + pd.Timedelta(days=window))
-                sub = pf_idx3[mask]
-                if sub.empty:
-                    i = (pf_idx3["dt"] - center).abs().argmin()
-                    return pf_idx3["dt"].iloc[i], float(pf_idx3["close"].iloc[i])
-                i = sub["close"].idxmin()
-                return pf_idx3["dt"].loc[i], float(pf_idx3["close"].loc[i])
-
-            def _idx_close_high_at_dt(target_dt, window=5):
-                """target_dt 근처 window일 범위에서 종가가 가장 높은 날짜+종가 (하락추세선용)"""
-                center = pd.Timestamp(target_dt)
-                mask = (pf_idx3["dt"] >= center - pd.Timedelta(days=window)) & \
-                       (pf_idx3["dt"] <= center + pd.Timedelta(days=window))
-                sub = pf_idx3[mask]
-                if sub.empty:
-                    i = (pf_idx3["dt"] - center).abs().argmin()
-                    return pf_idx3["dt"].iloc[i], float(pf_idx3["close"].iloc[i])
-                i = sub["close"].idxmax()
-                return pf_idx3["dt"].loc[i], float(pf_idx3["close"].loc[i])
-
-            # ── 수동 추세선: 마켓별로 다르게 적용 ──
-            # (날짜A, 날짜B, 색, 연장일, 기준: "low"=상승추세선 / "high"=하락추세선, idx_only=지수패널만)
-            # 날짜는 정확한 거래일로 지정 → window=0으로 exact match
-            _manual_lines_by_market = {
-                "KOSPI": [
-                    # (날짜A, 날짜B, 색, 연장일, 기준, idx_only)
-                    ("2026-02-13", "2026-02-26", "rgba(255,200,50,0.95)",  10, "low",  False),  # 상승추세선 (저점종가)
-                    ("2026-02-26", "2026-03-18", "rgba(255,100,100,0.90)", 10, "high", False),  # 하락추세선 (고점종가)
-                    ("2026-03-04", "2026-03-31", "rgba(100,200,255,0.90)", 14, "low",  False),  # 지지선 (저점종가)
-                ],
-                "KOSDAQ": [],   # 코스닥 추세선 없음 (못 그려서 제거)
-            }
-            _manual_lines = _manual_lines_by_market.get(market, [])
-
-            def _nearest_close(target_dt):
-                """지정 날짜에 가장 가까운 거래일의 종가 반환 (탐색 없음, 정확한 날짜 사용)"""
-                center = pd.Timestamp(target_dt)
-                diffs = (pf_idx3["dt"] - center).abs()
+                diffs = (frame["dt"] - center).abs()
                 i = diffs.argmin()
-                return pf_idx3["dt"].iloc[i], float(pf_idx3["close"].iloc[i])
+                if diffs.iloc[i] > pd.Timedelta(days=max_days):
+                    return None
+                return frame.loc[i]
 
-            for _da, _db, _col, _ext, _basis, _idx_only in _manual_lines:
-                if not _has_index or pf_idx3.empty:
-                    _dt_a = pd.Timestamp(_da)
-                    _dt_b = pd.Timestamp(_db)
-                    _y_a = _y_b = None
+            def _add_manual_trendline(panel: str, d1: str, d2: str, color: str,
+                                      label: str, y_kind: str = "close", ext_days: int = 7,
+                                      dash: str = "dot"):
+                """panel='index'는 y1, panel='nhnl'은 y2에만 그린다."""
+                if panel == "index":
+                    if not _has_index or pf_idx3.empty:
+                        return
+                    r1 = _nearest_row(pf_idx3.reset_index(drop=True), d1)
+                    r2 = _nearest_row(pf_idx3.reset_index(drop=True), d2)
+                    if r1 is None or r2 is None:
+                        return
+                    y_col = y_kind if y_kind in r1.index else "close"
+                    dt1, y1 = pd.Timestamp(r1["dt"]), float(r1[y_col])
+                    dt2, y2 = pd.Timestamp(r2["dt"]), float(r2[y_col])
+                    yaxis = "y1"
+                    yref = "y1"
+                    yshift = -14 if y_kind == "low" else 14
                 else:
-                    _dt_a, _y_a = _nearest_close(_da)
-                    _dt_b, _y_b = _nearest_close(_db)
+                    r1 = _nearest_row(pf3.reset_index(drop=True), d1)
+                    r2 = _nearest_row(pf3.reset_index(drop=True), d2)
+                    if r1 is None or r2 is None:
+                        return
+                    dt1, y1 = pd.Timestamp(r1["dt"]), float(r1["nhnl"])
+                    dt2, y2 = pd.Timestamp(r2["dt"]), float(r2["nhnl"])
+                    yaxis = "y2"
+                    yref = "y2"
+                    yshift = -14 if y2 >= y1 else 14
 
-                _, _ny_a = _nhnl_val_at_dt(_dt_a)
-                _, _ny_b = _nhnl_val_at_dt(_dt_b)
-
-                # 위 패널: 지수 추세선 (y1)
-                if _y_a is not None and _y_b is not None:
-                    _xs, _ys = _extend_line(_dt_a, _y_a, _dt_b, _y_b, ext_days=_ext)
-                    fig_hl.add_trace(go.Scatter(
-                        x=_xs, y=_ys, mode="lines",
-                        line=dict(color=_col, width=2, dash="dot"),
-                        showlegend=False, xaxis="x", yaxis="y1",
-                    ))
-                    # 시작/끝 날짜 레이블 (선 위에 작게)
-                    fig_hl.add_annotation(x=_dt_a, y=_y_a, text=_dt_a.strftime("%m/%d"),
-                        font=dict(size=9, color=_col), showarrow=False,
-                        yshift=-14, xref="x", yref="y1")
-                    fig_hl.add_annotation(x=_dt_b, y=_y_b, text=_dt_b.strftime("%m/%d"),
-                        font=dict(size=9, color=_col), showarrow=False,
-                        yshift=-14, xref="x", yref="y1")
-
-                # 아래 패널: NH-NL 추세선 (y2) — 선만, 마커/텍스트 없음
-                if not _idx_only and _ny_a is not None and _ny_b is not None:
-                    _xs2, _ys2 = _extend_line(_dt_a, _ny_a, _dt_b, _ny_b, ext_days=_ext)
-                    fig_hl.add_trace(go.Scatter(
-                        x=_xs2, y=_ys2, mode="lines",
-                        line=dict(color=_col, width=2, dash="dot"),
-                        showlegend=False, xaxis="x", yaxis="y2",
-                    ))
-
-            # ── 지수 전용 상승추세선 (y1만) — 마켓별 ──
-            _up_lines_by_market = {
-                "KOSPI":  [("2026-03-31", "2026-04-07", "rgba(100,255,150,0.90)", 21)],  # 원래 있던 코스피 상승추세선
-                "KOSDAQ": [
-                    ("2026-03-06", "2026-04-03", "rgba(100,255,150,0.85)", 21),
-                    ("2026-04-10", "2026-04-24", "rgba(80,220,120,0.95)", 14),
-                ],
-            }
-            _up_lines_idx_only = _up_lines_by_market.get(market, [])
-
-            for _da, _db, _col, _ext in _up_lines_idx_only:
-                if not _has_index or pf_idx3.empty:
-                    continue
-                _dt_a, _y_a = _nearest_close(_da)
-                _dt_b, _y_b = _nearest_close(_db)
-                _xs, _ys = _extend_line(_dt_a, _y_a, _dt_b, _y_b, ext_days=_ext)
+                xs, ys = _extend_line(dt1, y1, dt2, y2, ext_days=ext_days)
                 fig_hl.add_trace(go.Scatter(
-                    x=_xs, y=_ys, mode="lines",
-                    line=dict(color=_col, width=2, dash="dot"),
-                    showlegend=False, xaxis="x", yaxis="y1",
+                    x=xs, y=ys, mode="lines",
+                    line=dict(color=color, width=2, dash=dash),
+                    name=label, showlegend=False,
+                    hovertemplate=f"{label}<br>%{{x|%Y/%m/%d}}: %{{y:,.2f}}<extra></extra>",
+                    xaxis="x", yaxis=yaxis,
                 ))
-                fig_hl.add_annotation(x=_dt_a, y=_y_a, text=_dt_a.strftime("%m/%d"),
-                    font=dict(size=9, color=_col), showarrow=False,
-                    yshift=-14, xref="x", yref="y1")
-                fig_hl.add_annotation(x=_dt_b, y=_y_b, text=_dt_b.strftime("%m/%d"),
-                    font=dict(size=9, color=_col), showarrow=False,
-                    yshift=-14, xref="x", yref="y1")
+                for _dt, _y in [(dt1, y1), (dt2, y2)]:
+                    fig_hl.add_annotation(
+                        x=_dt, y=_y, xref="x", yref=yref,
+                        text=_dt.strftime("%m/%d"), showarrow=False,
+                        font=dict(size=10, color=color),
+                        bgcolor="rgba(0,0,0,0.35)",
+                        yshift=yshift,
+                    )
+
+            if market == "KOSDAQ":
+                # NH-NL 차트영역: 지정한 주간 NH-NL 추세선만
+                _add_manual_trendline("nhnl", "2026-01-30", "2026-02-27", "rgba(255,95,95,0.95)",  "NH-NL 하락 01/30→02/27", ext_days=7)
+                _add_manual_trendline("nhnl", "2026-03-06", "2026-04-03", "rgba(80,220,140,0.95)", "NH-NL 상승 03/06→04/03", ext_days=7)
+                _add_manual_trendline("nhnl", "2026-04-10", "2026-04-24", "rgba(80,220,140,0.95)", "NH-NL 상승 04/10→04/24", ext_days=10)
+
+                # 지수 차트영역: 저점 기준 상승추세선만
+                _add_manual_trendline("index", "2026-02-06", "2026-02-25", "rgba(80,220,140,0.95)", "지수 저점 상승 02/06→02/25", y_kind="low", ext_days=7)
+                _add_manual_trendline("index", "2026-03-04", "2026-04-02", "rgba(80,220,140,0.95)", "지수 저점 상승 03/04→04/02", y_kind="low", ext_days=7)
+                _add_manual_trendline("index", "2026-04-13", "2026-04-24", "rgba(80,220,140,0.95)", "지수 저점 상승 04/13→04/24", y_kind="low", ext_days=10)
+
+            elif market == "KOSPI":
+                # 지수 차트영역: 잘못된 고점선 제거 후 저점 기준 상승추세선만
+                _add_manual_trendline("index", "2026-02-13", "2026-02-24", "rgba(80,220,140,0.95)", "지수 저점 상승 02/13→02/24", y_kind="low", ext_days=7)
+                _add_manual_trendline("index", "2026-03-31", "2026-04-13", "rgba(80,220,140,0.95)", "지수 저점 상승 03/31→04/13", y_kind="low", ext_days=14)
+
+                # NH-NL 차트영역: 지정한 상승추세선만. 주간 날짜는 정확히 03/20, 04/03, 04/24를 사용.
+                _add_manual_trendline("nhnl", "2026-03-20", "2026-04-03", "rgba(120,180,255,0.95)", "NH-NL 보조 03/20→04/03", ext_days=0)
+                _add_manual_trendline("nhnl", "2026-04-03", "2026-04-24", "rgba(80,220,140,0.95)", "NH-NL 상승 04/03→04/24", ext_days=10)
 
             # 0선 / ±500 기준선 (y2 패널)
             for _y, _color, _dash, _width in [
