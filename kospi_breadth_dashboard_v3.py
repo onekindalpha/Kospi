@@ -1846,7 +1846,9 @@ def main():
             )
 
 
-            # FINAL HOVER FIX: hover/legend 태그 유지 + 글씨 검정 고정
+            # FINAL RENDER FIX:
+            # st.plotly_chart의 배포 환경 hover 글씨색 버그를 피하기 위해
+            # fig_hl만 components.html로 렌더링하고, iframe 내부에서 hover/legend 글씨색을 직접 강제한다.
             fig_hl.update_layout(
                 hovermode="x",
                 hoverlabel=dict(
@@ -1878,7 +1880,75 @@ def main():
                 except Exception:
                     pass
 
-            st.plotly_chart(fig_hl, width='stretch')
+            import plotly.io as _pio
+            import streamlit.components.v1 as _components
+
+            _fig_html = _pio.to_html(
+                fig_hl,
+                full_html=False,
+                include_plotlyjs="cdn",
+                config={
+                    "responsive": True,
+                    "displayModeBar": True,
+                    "displaylogo": False,
+                },
+            )
+
+            _fix_js = """
+<style>
+html, body {
+    margin: 0;
+    padding: 0;
+    background: transparent;
+}
+.js-plotly-plot .plotly .legend text,
+.js-plotly-plot .plotly .legendtext {
+    fill: #000000 !important;
+    color: #000000 !important;
+}
+</style>
+
+<script>
+function forceReadablePlotlyLabels() {
+    document.querySelectorAll('.hoverlayer .hovertext text, .hoverlayer .hovertext tspan').forEach(function(el) {
+        el.style.fill = '#000000';
+        el.style.color = '#000000';
+        el.setAttribute('fill', '#000000');
+    });
+
+    document.querySelectorAll('.hoverlayer .hovertext path').forEach(function(el) {
+        el.style.fill = 'rgba(255,255,255,0.98)';
+        el.style.stroke = '#555555';
+        el.setAttribute('fill', 'rgba(255,255,255,0.98)');
+        el.setAttribute('stroke', '#555555');
+    });
+
+    document.querySelectorAll('.legend text, .legendtext').forEach(function(el) {
+        el.style.fill = '#000000';
+        el.style.color = '#000000';
+        el.setAttribute('fill', '#000000');
+    });
+}
+
+const observer = new MutationObserver(forceReadablePlotlyLabels);
+observer.observe(document.body, {
+    childList: true,
+    subtree: true,
+    attributes: true,
+    characterData: true
+});
+
+setInterval(forceReadablePlotlyLabels, 100);
+window.addEventListener('load', forceReadablePlotlyLabels);
+document.addEventListener('mousemove', forceReadablePlotlyLabels);
+</script>
+"""
+
+            _components.html(
+                _fix_js + _fig_html,
+                height=650,
+                scrolling=False,
+            )
 
             # PATCH: Weinstein explanation box
             if market == "KOSPI":
