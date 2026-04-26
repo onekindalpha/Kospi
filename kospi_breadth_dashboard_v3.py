@@ -1848,101 +1848,47 @@ def main():
             fig_hl.update_traces( hovertemplate=None)
 
 
-            # FINAL CLEANUP: hover/legend/annotation 최종 보정
-            # hover 태그 유지 + 태그 글씨 검정색 강제
-            st.markdown("""
-<style>
-div[data-testid="stPlotlyChart"] .hoverlayer .hovertext text {
-    fill: #111111 !important;
-}
-div[data-testid="stPlotlyChart"] .hoverlayer .hovertext path {
-    fill: rgba(245,245,245,0.96) !important;
-    stroke: #777777 !important;
-}
-div[data-testid="stPlotlyChart"] .legend text {
-    fill: #111111 !important;
-}
-</style>
-""", unsafe_allow_html=True)
-
+            # FINAL HOVER FIX: hover 태그 유지 + 태그 글씨 검정색 강제
+            # Plotly가 실제로 적용하는 direct property 방식 사용
             fig_hl.update_layout(
                 hovermode="closest",
-                hoverlabel=dict(
-                    bgcolor="rgba(245,245,245,0.96)",
-                    font=dict(color="#111111", size=12),
-                    bordercolor="#777777",
-                ),
+                hoverlabel_bgcolor="rgba(245,245,245,1.0)",
+                hoverlabel_font_color="#000000",
+                hoverlabel_font_size=13,
+                hoverlabel_bordercolor="#555555",
                 legend=dict(
-                    bgcolor="rgba(245,245,245,0.92)",
-                    bordercolor="rgba(160,160,160,0.8)",
+                    bgcolor="rgba(245,245,245,0.95)",
+                    bordercolor="#999999",
                     borderwidth=1,
-                    font=dict(color="#111111", size=11),
+                    font=dict(color="#000000", size=11),
                 ),
             )
 
+            fig_hl.update_traces(
+                hoverlabel_bgcolor="rgba(245,245,245,1.0)",
+                hoverlabel_font_color="#000000",
+                hoverlabel_font_size=13,
+                hoverlabel_bordercolor="#555555",
+            )
+
+            # trace별 hovertemplate에도 검정색 inline style 강제
             for _tr in fig_hl.data:
+                _name = getattr(_tr, "name", "") or ""
                 try:
                     _tr.update(
-                        hoverlabel=dict(
-                            bgcolor="rgba(245,245,245,0.96)",
-                            font=dict(color="#111111", size=12),
-                            bordercolor="#777777",
-                        )
+                        hovertemplate=(
+                            "<span style='color:#000000'>"
+                            + str(_name)
+                            + "<br>%{x|%Y/%m/%d}<br>%{y:,.2f}"
+                            + "</span><extra></extra>"
+                        ),
+                        hoverlabel_bgcolor="rgba(245,245,245,1.0)",
+                        hoverlabel_font_color="#000000",
+                        hoverlabel_font_size=13,
+                        hoverlabel_bordercolor="#555555",
                     )
                 except Exception:
                     pass
-
-            # KOSDAQ 01/21, 02/06, 02/25 라벨을 다른 날짜 라벨 스타일과 통일
-            _fix_texts = {"01/21", "02/06", "02/25"}
-            _ref_ann = None
-
-            for _ann in list(fig_hl.layout.annotations):
-                _txt = str(getattr(_ann, "text", ""))
-                if _txt in {"03/04", "04/07", "04/24", "03/31"}:
-                    _ref_ann = _ann
-                    break
-
-            _ref_style = {}
-            if _ref_ann is not None:
-                _ref_json = _ref_ann.to_plotly_json()
-                for _k in ["bgcolor", "bordercolor", "borderwidth", "borderpad", "opacity"]:
-                    if _k in _ref_json:
-                        _ref_style[_k] = _ref_json[_k]
-                if "font" in _ref_json:
-                    _ref_style["font"] = _ref_json["font"]
-
-            if not _ref_style:
-                _ref_style = {
-                    "font": dict(size=9, color="rgba(80,255,150,0.95)"),
-                    "bgcolor": "rgba(80,255,150,0.18)",
-                    "bordercolor": "rgba(80,255,150,0.25)",
-                    "borderwidth": 0,
-                    "opacity": 1,
-                }
-
-            _clean_annotations = []
-            _seen_fix = set()
-
-            for _ann in list(fig_hl.layout.annotations):
-                _txt = str(getattr(_ann, "text", ""))
-
-                if _txt in _fix_texts:
-                    if _txt in _seen_fix:
-                        continue
-                    _seen_fix.add(_txt)
-
-                    _ann.update(
-                        font=_ref_style.get("font", dict(size=9, color="rgba(80,255,150,0.95)")),
-                        bgcolor=_ref_style.get("bgcolor", "rgba(80,255,150,0.18)"),
-                        bordercolor=_ref_style.get("bordercolor", "rgba(80,255,150,0.25)"),
-                        borderwidth=_ref_style.get("borderwidth", 0),
-                        opacity=_ref_style.get("opacity", 1),
-                        showarrow=False,
-                    )
-
-                _clean_annotations.append(_ann)
-
-            fig_hl.update_layout(annotations=_clean_annotations)
 
             st.plotly_chart(fig_hl, width='stretch')
 
