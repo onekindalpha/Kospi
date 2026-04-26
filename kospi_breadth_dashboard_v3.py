@@ -1848,44 +1848,32 @@ def main():
             fig_hl.update_traces( hovertemplate=None)
 
 
-            # FINAL HOVER FIX: hover 태그 유지 + 태그 글씨 검정색 강제
-            # Plotly가 실제로 적용하는 direct property 방식 사용
+            # FINAL HOVER FIX: hover 태그 유지 + 가독성 확정
+            # 배포 환경에서 hover 글씨색이 검정으로 안 먹는 문제가 있어,
+            # 배경을 어둡게 고정해서 흰 글씨라도 반드시 읽히게 한다.
             fig_hl.update_layout(
                 hovermode="closest",
-                hoverlabel_bgcolor="rgba(245,245,245,1.0)",
-                hoverlabel_font_color="#000000",
-                hoverlabel_font_size=13,
-                hoverlabel_bordercolor="#555555",
+                hoverlabel=dict(
+                    bgcolor="#111827",
+                    font=dict(color="#ffffff", size=13),
+                    bordercolor="#9ca3af",
+                ),
                 legend=dict(
-                    bgcolor="rgba(245,245,245,0.95)",
-                    bordercolor="#999999",
+                    bgcolor="#111827",
+                    bordercolor="#9ca3af",
                     borderwidth=1,
-                    font=dict(color="#000000", size=11),
+                    font=dict(color="#ffffff", size=11),
                 ),
             )
 
-            fig_hl.update_traces(
-                hoverlabel_bgcolor="rgba(245,245,245,1.0)",
-                hoverlabel_font_color="#000000",
-                hoverlabel_font_size=13,
-                hoverlabel_bordercolor="#555555",
-            )
-
-            # trace별 hovertemplate에도 검정색 inline style 강제
             for _tr in fig_hl.data:
-                _name = getattr(_tr, "name", "") or ""
                 try:
                     _tr.update(
-                        hovertemplate=(
-                            "<span style='color:#000000'>"
-                            + str(_name)
-                            + "<br>%{x|%Y/%m/%d}<br>%{y:,.2f}"
-                            + "</span><extra></extra>"
-                        ),
-                        hoverlabel_bgcolor="rgba(245,245,245,1.0)",
-                        hoverlabel_font_color="#000000",
-                        hoverlabel_font_size=13,
-                        hoverlabel_bordercolor="#555555",
+                        hoverlabel=dict(
+                            bgcolor="#111827",
+                            font=dict(color="#ffffff", size=13),
+                            bordercolor="#9ca3af",
+                        )
                     )
                 except Exception:
                     pass
