@@ -702,7 +702,7 @@ def make_plotly_chart(df: pd.DataFrame, market: str, sig: dict,
     fig.add_trace(go.Scatter(
         x=pf["dt"], y=_price_mapped,
         line=dict(color="rgba(180,180,180,0.5)", width=1.0), name="Price (scaled)",
-        hoverinfo="skip",
+        
         xaxis="x", yaxis="y2",
     ))
 
@@ -1590,7 +1590,7 @@ def main():
                         fill="toself",
                         fillcolor="rgba(255,220,100,0.06)",
                         line=dict(color="rgba(0,0,0,0)"),
-                        showlegend=False, hoverinfo="skip",
+                        showlegend=False, 
                         xaxis="x", yaxis="y2",
                     ))
 
@@ -1845,14 +1845,26 @@ def main():
                             spikethickness=1, spikecolor="rgba(200,200,200,0.4)"),
             )
             # hover 박스 글자색 문제 방지: fig_hl hover 비활성화
-            fig_hl.update_traces(hoverinfo="skip", hovertemplate=None)
+            fig_hl.update_traces( hovertemplate=None)
 
 
-            # FINAL CLEANUP: hover/legend/annotation 가독성 최종 보정
-            # - hover 태그는 유지
-            # - 태그 글씨는 검정
-            # - legend 하얀 박스 글씨도 검정
-            # - 01/21, 02/06, 02/25 라벨은 다른 날짜 라벨처럼 통일
+            # FINAL CLEANUP: hover/legend/annotation 최종 보정
+            # hover 태그 유지 + 태그 글씨 검정색 강제
+            st.markdown("""
+<style>
+div[data-testid="stPlotlyChart"] .hoverlayer .hovertext text {
+    fill: #111111 !important;
+}
+div[data-testid="stPlotlyChart"] .hoverlayer .hovertext path {
+    fill: rgba(245,245,245,0.96) !important;
+    stroke: #777777 !important;
+}
+div[data-testid="stPlotlyChart"] .legend text {
+    fill: #111111 !important;
+}
+</style>
+""", unsafe_allow_html=True)
+
             fig_hl.update_layout(
                 hovermode="closest",
                 hoverlabel=dict(
@@ -1871,41 +1883,60 @@ def main():
             for _tr in fig_hl.data:
                 try:
                     _tr.update(
-                        hoverinfo="x+y+name",
-                        hovertemplate="<span style='color:#111111'>%{x|%Y/%m/%d}<br>%{fullData.name}: %{y:,.2f}</span><extra></extra>",
-                        hoverlabel=dict(
-                            bgcolor="rgba(245,245,245,0.96)",
-                            font=dict(color="#111111", size=12),
-                            bordercolor="#777777",
-                        ),
-                    )
-                except Exception:
-                    _tr.update(
                         hoverlabel=dict(
                             bgcolor="rgba(245,245,245,0.96)",
                             font=dict(color="#111111", size=12),
                             bordercolor="#777777",
                         )
                     )
+                except Exception:
+                    pass
 
-            # 특정 날짜 라벨 스타일 통일 + 중복 제거
-            _fix_label_texts = {"01/21", "02/06", "02/25"}
-            _seen_label_texts = set()
+            # KOSDAQ 01/21, 02/06, 02/25 라벨을 다른 날짜 라벨 스타일과 통일
+            _fix_texts = {"01/21", "02/06", "02/25"}
+            _ref_ann = None
+
+            for _ann in list(fig_hl.layout.annotations):
+                _txt = str(getattr(_ann, "text", ""))
+                if _txt in {"03/04", "04/07", "04/24", "03/31"}:
+                    _ref_ann = _ann
+                    break
+
+            _ref_style = {}
+            if _ref_ann is not None:
+                _ref_json = _ref_ann.to_plotly_json()
+                for _k in ["bgcolor", "bordercolor", "borderwidth", "borderpad", "opacity"]:
+                    if _k in _ref_json:
+                        _ref_style[_k] = _ref_json[_k]
+                if "font" in _ref_json:
+                    _ref_style["font"] = _ref_json["font"]
+
+            if not _ref_style:
+                _ref_style = {
+                    "font": dict(size=9, color="rgba(80,255,150,0.95)"),
+                    "bgcolor": "rgba(80,255,150,0.18)",
+                    "bordercolor": "rgba(80,255,150,0.25)",
+                    "borderwidth": 0,
+                    "opacity": 1,
+                }
+
             _clean_annotations = []
+            _seen_fix = set()
 
             for _ann in list(fig_hl.layout.annotations):
                 _txt = str(getattr(_ann, "text", ""))
 
-                if _txt in _fix_label_texts:
-                    if _txt in _seen_label_texts:
+                if _txt in _fix_texts:
+                    if _txt in _seen_fix:
                         continue
-                    _seen_label_texts.add(_txt)
+                    _seen_fix.add(_txt)
 
                     _ann.update(
-                        font=dict(size=9, color="rgba(80,255,150,0.95)"),
-                        bgcolor="rgba(0,0,0,0)",
-                        bordercolor="rgba(0,0,0,0)",
-                        borderwidth=0,
+                        font=_ref_style.get("font", dict(size=9, color="rgba(80,255,150,0.95)")),
+                        bgcolor=_ref_style.get("bgcolor", "rgba(80,255,150,0.18)"),
+                        bordercolor=_ref_style.get("bordercolor", "rgba(80,255,150,0.25)"),
+                        borderwidth=_ref_style.get("borderwidth", 0),
+                        opacity=_ref_style.get("opacity", 1),
                         showarrow=False,
                     )
 
