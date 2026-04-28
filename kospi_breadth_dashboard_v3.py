@@ -1518,11 +1518,22 @@ def main():
                         ("중립", "◆", _s_vals[1], "rgba(255,210,60,0.95)",  "diamond",        11),
                         ("비관", "▼", _s_vals[2], "rgba(255,80,80,0.95)",   "triangle-down",  13),
                     ]
+
+                    # 시나리오 시작점: 오늘(이번 주 현재값) → 금요일 예상
+                    _scenario_start_x = _today
+                    _scenario_start_y = _current_sum  # 이번 주 누적값
+
+                    # y축 range 동적 계산 (시나리오 최댓값 포함)
+                    _nhnl_vals = list(pf3["nhnl"].astype(float))
+                    _all_y = _nhnl_vals + [_s_vals[0], _s_vals[2]]
+                    _y_min = min(_all_y) * 1.15 if min(_all_y) < 0 else min(_all_y) * 0.85
+                    _y_max = max(_all_y) * 1.15
+
                     for _slabel, _ssymtxt, _sest, _scol, _ssym, _ssz in _scenarios:
-                        # 차트: 선+끝마커 (showlegend=False)
+                        # 오늘 → 금요일 예상 (이번 주만)
                         fig_hl.add_trace(go.Scatter(
-                            x=[_last_wk_dt, _forecast_end],
-                            y=[_last_wk_nhnl, _sest],
+                            x=[_scenario_start_x, _forecast_end],
+                            y=[_scenario_start_y, _sest],
                             mode="lines+markers",
                             line=dict(color=_scol, width=1.5, dash="longdashdot"),
                             marker=dict(size=[0, _ssz], color=_scol, symbol=_ssym,
@@ -1531,7 +1542,7 @@ def main():
                             hovertemplate=(f"{_slabel}<br>금요일 예상: {_sest:+,}<extra></extra>"),
                             xaxis="x", yaxis="y2",
                         ))
-                        # 범례: 선만 (마커 없음) — 이름에 심볼 포함
+                        # 범례: 선만
                         fig_hl.add_trace(go.Scatter(
                             x=[None], y=[None],
                             mode="lines",
@@ -1540,19 +1551,6 @@ def main():
                             showlegend=True,
                             xaxis="x", yaxis="y2",
                         ))
-
-                    # 음영: 비관~낙관 범위
-                    _lo = min(_avg_pes, _avg_opt)
-                    _hi = max(_avg_pes, _avg_opt)
-                    fig_hl.add_trace(go.Scatter(
-                        x=[_last_wk_dt, _forecast_end, _forecast_end, _last_wk_dt],
-                        y=[_last_wk_nhnl, _hi, _lo, _last_wk_nhnl],
-                        fill="toself",
-                        fillcolor="rgba(255,220,100,0.06)",
-                        line=dict(color="rgba(0,0,0,0)"),
-                        showlegend=False, hoverinfo="skip",
-                        xaxis="x", yaxis="y2",
-                    ))
 
                     # 저점→시나리오 지지선 제거 (시나리오 마커만으로 충분)
             except Exception as _fe:
