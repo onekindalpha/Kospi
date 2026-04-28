@@ -744,11 +744,15 @@ def make_plotly_chart(df: pd.DataFrame, market: str, sig: dict,
 
     fig.update_layout(
         template="plotly_dark", height=660,
+        paper_bgcolor="rgba(14,17,23,1)",
+        plot_bgcolor="rgba(14,17,23,1)",
         title=dict(text=f"{market} — {div_text}", font=dict(size=14, color=div_color)),
-        # hovermode="x": 같은 x의 모든 trace에 동시 hover → y2 spike도 위 패널 hover로 트리거됨
         hovermode="x",
         hoverlabel=dict(bgcolor="#1e1e2e", font_color="#ffffff", font_size=12, bordercolor="#555"),
-        legend=dict(orientation="h", y=1.01, x=0),
+        legend=dict(orientation="h", y=1.01, x=0,
+                    bgcolor="rgba(14,17,23,0.9)",
+                    bordercolor="#555", borderwidth=1,
+                    font=dict(color="white", size=11)),
         margin=dict(l=10, r=90, t=55, b=35),
         xaxis=dict(
             domain=[0, 1],
@@ -1188,7 +1192,13 @@ def main():
         fig_mi.update_layout(
             title=f"{market} MI 탄력지수 — AD차이 {mi_window}일 롤링 평균 (스탠 와인스태인)",
             template="plotly_dark", height=420,
-            legend=dict(orientation="h", y=1.05),
+            paper_bgcolor="rgba(14,17,23,1)",
+            plot_bgcolor="rgba(14,17,23,1)",
+            hoverlabel=dict(bgcolor="#1e1e2e", font_color="#ffffff", font_size=12, bordercolor="#555"),
+            legend=dict(orientation="h", y=1.05,
+                        bgcolor="rgba(14,17,23,0.9)",
+                        bordercolor="#555", borderwidth=1,
+                        font=dict(color="white", size=11)),
             yaxis_title="MI 값 (AD 평균)"
         )
         st.plotly_chart(fig_mi, width='stretch')
@@ -1663,13 +1673,18 @@ def main():
 
             fig_hl.update_layout(
                 template="plotly_dark", height=560,
+                paper_bgcolor="rgba(14,17,23,1)",
+                plot_bgcolor="rgba(14,17,23,1)",
                 title=dict(text=f"{market} NH-NL — {nhnl_verdict}",
                            font=dict(size=13, color=trend_color)),
                 hovermode="x",
-                hoverlabel=dict(bgcolor="#1e1e2e", font_color="white",
-                               font_size=12, bordercolor="#444"),
+                hoverlabel=dict(bgcolor="#1e1e2e", font_color="#ffffff",
+                               font_size=12, bordercolor="#555"),
                 margin=dict(l=10, r=60, t=45, b=35),
-                legend=dict(orientation="h", y=1.01),
+                legend=dict(orientation="h", y=1.01,
+                            bgcolor="rgba(14,17,23,0.9)",
+                            bordercolor="#555", borderwidth=1,
+                            font=dict(color="white", size=11)),
                 # 단일 xaxis — 세로선이 도메인 0~1 전체 관통
                 xaxis=dict(
                     domain=[0, 1],
