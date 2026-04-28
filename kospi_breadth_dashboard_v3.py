@@ -1498,8 +1498,10 @@ def main():
                     _x_pts = [_last_wk_dt, _today, _this_fri]
                     _y_pts = [_last_wk_nhnl, _current_sum, _est_nhnl]
 
-                # 오늘이 금요일 다음이면 확정 → 예상치 불필요
-                _this_fri_confirmed = _today > _this_fri
+                # 이번 주 데이터가 전혀 없으면 예상 불필요 (지난주까지만 확정된 상태)
+                # _this_week_daily 또는 _this_week_row 중 하나라도 있어야 이번 주로 판단
+                _has_this_week_data = (not _this_week_daily.empty) or (not _this_week_row.empty)
+                _this_fri_confirmed = _today > _this_fri or not _has_this_week_data
                 if not _this_fri_confirmed:
                     # ── 시나리오 3개 ──────────────────────────────────
                     # 직전 4주 일평균들로 낙관/중립/비관 계산
@@ -1721,6 +1723,7 @@ def main():
                            showspikes=True, spikemode="across", spikesnap="cursor",
                            spikethickness=1, spikecolor="rgba(200,200,200,0.4)"),
                 yaxis2=dict(title="NH-NL", domain=[0.0, 0.42], zeroline=False, anchor="x",
+                            autorange=True,
                             showspikes=True, spikemode="across", spikesnap="cursor",
                             spikethickness=1, spikecolor="rgba(200,200,200,0.4)"),
             )
