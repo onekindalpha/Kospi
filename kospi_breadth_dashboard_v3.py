@@ -1437,6 +1437,10 @@ def main():
             # nhnl_daily CSV가 있으면 → 이번 주 실제 일별 누적으로 예상
             # 없으면 → 직전 주 일평균으로 추정
             _forecast_error = None
+            # y축 range 기본값 (시나리오 없을 때)
+            _nhnl_base = list(pf3["nhnl"].astype(float))
+            _y_min = min(_nhnl_base) * 1.15 if min(_nhnl_base) < 0 else min(_nhnl_base) * 0.85
+            _y_max = max(_nhnl_base) * 1.15
             try:
                 _today = pd.Timestamp(datetime.today().date())
                 _this_mon = _today - pd.Timedelta(days=_today.weekday())
@@ -1498,10 +1502,9 @@ def main():
                     _x_pts = [_last_wk_dt, _today, _this_fri]
                     _y_pts = [_last_wk_nhnl, _current_sum, _est_nhnl]
 
-                # 이번 주 데이터가 전혀 없으면 예상 불필요 (지난주까지만 확정된 상태)
-                # _this_week_daily 또는 _this_week_row 중 하나라도 있어야 이번 주로 판단
-                _has_this_week_data = (not _this_week_daily.empty) or (not _this_week_row.empty)
-                _this_fri_confirmed = _today > _this_fri or not _has_this_week_data
+                # 이번 주 금요일이 아직 안 지났고, 이번 주 일별 데이터가 실제로 있어야만 예상 표시
+                # _this_week_row는 W-FRI 기준이라 지난주 데이터가 섞일 수 있으므로 제외
+                _this_fri_confirmed = _today > _this_fri or _this_week_daily.empty
                 if not _this_fri_confirmed:
                     # ── 시나리오 3개 ──────────────────────────────────
                     # 직전 4주 일평균들로 낙관/중립/비관 계산
@@ -1525,9 +1528,12 @@ def main():
 
                     # y축 range 동적 계산 (시나리오 최댓값 포함)
                     _nhnl_vals = list(pf3["nhnl"].astype(float))
-                    _all_y = _nhnl_vals + [_s_vals[0], _s_vals[2]]
-                    _y_min = min(_all_y) * 1.15 if min(_all_y) < 0 else min(_all_y) * 0.85
-                    _y_max = max(_all_y) * 1.15
+                    _all_y = _nhnl_vals + _s_vals
+                    _y_raw_min = min(_all_y)
+                    _y_raw_max = max(_all_y)
+                    _y_pad = (_y_raw_max - _y_raw_min) * 0.15
+                    _y_min = _y_raw_min - _y_pad
+                    _y_max = _y_raw_max + _y_pad
 
                     for _slabel, _ssymtxt, _sest, _scol, _ssym, _ssz in _scenarios:
                         # 오늘 → 금요일 예상 (이번 주만)
@@ -1721,7 +1727,7 @@ def main():
                            showspikes=True, spikemode="across", spikesnap="cursor",
                            spikethickness=1, spikecolor="rgba(200,200,200,0.4)"),
                 yaxis2=dict(title="NH-NL", domain=[0.0, 0.42], zeroline=False, anchor="x",
-                            autorange=True,
+                            range=[_y_min, _y_max],
                             showspikes=True, spikemode="across", spikesnap="cursor",
                             spikethickness=1, spikecolor="rgba(200,200,200,0.4)"),
             )
