@@ -783,6 +783,14 @@ def make_plotly_chart(df: pd.DataFrame, market: str, sig: dict,
 def main():
     st.set_page_config(page_title="국장 브레드스 대시보드",
                        page_icon="📊", layout="wide")
+    # Plotly hover 툴팁 강제 스타일 (Streamlit이 덮어쓰는 흰 배경 제거)
+    st.markdown("""
+    <style>
+    .hoverlayer .hovertext rect { fill: rgba(0,0,0,0.88) !important; stroke: #555 !important; }
+    .hoverlayer .hovertext text { fill: #ffffff !important; }
+    .hoverlayer .hovertext path { stroke: #555 !important; }
+    </style>
+    """, unsafe_allow_html=True)
     st.title("📊 국장 A/D Line 브레드스 대시보드")
     st.caption("KRX 상승·하락 종목 수 기반 / 스탠 와인스태인 브레드스 분석")
 
