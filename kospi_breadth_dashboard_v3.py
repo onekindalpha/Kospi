@@ -1211,9 +1211,20 @@ def main():
         )
         import plotly.io as _pio
         import streamlit.components.v1 as _stc
-        _mi_html = _pio.to_html(fig_mi, full_html=True, include_plotlyjs="cdn",
-                                config={"responsive": True, "displayModeBar": False})
-        _stc.html(_mi_html, height=450, scrolling=False)
+        _mi_fig_html = _pio.to_html(fig_mi, full_html=False, include_plotlyjs="cdn",
+                                    div_id="mi_chart",
+                                    config={"responsive": True, "displayModeBar": False})
+        _mi_full = f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<style>
+  body {{ margin:0; padding:0; background:transparent; }}
+  #mi_chart {{ width:100%; }}
+  .hoverlayer .hovertext rect {{ fill: rgba(0,0,0,0.88) !important; stroke:#555 !important; }}
+  .hoverlayer .hovertext text {{ fill: #ffffff !important; }}
+  .hoverlayer .hovertext path {{ stroke: #555 !important; }}
+</style>
+</head><body>{_mi_fig_html}</body></html>"""
+        _stc.html(_mi_full, height=450, scrolling=False)
 
         if len(df) < mi_window:
             st.warning(f"⚠️ 데이터 {len(df)}일 — {mi_window}일 MA 계산에 데이터가 부족합니다. "
@@ -1715,9 +1726,20 @@ def main():
             )
             import plotly.io as _pio
             import streamlit.components.v1 as _stc
-            _hl_html = _pio.to_html(fig_hl, full_html=True, include_plotlyjs="cdn",
-                                    config={"responsive": True, "displayModeBar": False})
-            _stc.html(_hl_html, height=590, scrolling=False)
+            _hl_fig_html = _pio.to_html(fig_hl, full_html=False, include_plotlyjs="cdn",
+                                        div_id="hl_chart",
+                                        config={"responsive": True, "displayModeBar": False})
+            _hl_full = f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<style>
+  body {{ margin:0; padding:0; background:transparent; }}
+  #hl_chart {{ width:100%; }}
+  .hoverlayer .hovertext rect {{ fill: rgba(0,0,0,0.88) !important; stroke:#555 !important; }}
+  .hoverlayer .hovertext text {{ fill: #ffffff !important; }}
+  .hoverlayer .hovertext path {{ stroke: #555 !important; }}
+</style>
+</head><body>{_hl_fig_html}</body></html>"""
+            _stc.html(_hl_full, height=590, scrolling=False)
             st.caption(
                 "📌 금요일 NH-NL 예상 (긴점선) — "
                 "▲ **낙관**: 직전 4주 최고 주간 일평균 × 5 | "
