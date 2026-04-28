@@ -1209,7 +1209,11 @@ def main():
                         font=dict(color="white", size=11)),
             yaxis_title="MI 값 (AD 평균)"
         )
-        st.plotly_chart(fig_mi, width='stretch')
+        import plotly.io as _pio
+        import streamlit.components.v1 as _stc
+        _mi_html = _pio.to_html(fig_mi, full_html=True, include_plotlyjs="cdn",
+                                config={"responsive": True, "displayModeBar": False})
+        _stc.html(_mi_html, height=450, scrolling=False)
 
         if len(df) < mi_window:
             st.warning(f"⚠️ 데이터 {len(df)}일 — {mi_window}일 MA 계산에 데이터가 부족합니다. "
@@ -1709,7 +1713,11 @@ def main():
                             showspikes=True, spikemode="across", spikesnap="cursor",
                             spikethickness=1, spikecolor="rgba(200,200,200,0.4)"),
             )
-            st.plotly_chart(fig_hl, width='stretch')
+            import plotly.io as _pio
+            import streamlit.components.v1 as _stc
+            _hl_html = _pio.to_html(fig_hl, full_html=True, include_plotlyjs="cdn",
+                                    config={"responsive": True, "displayModeBar": False})
+            _stc.html(_hl_html, height=590, scrolling=False)
             st.caption(
                 "📌 금요일 NH-NL 예상 (긴점선) — "
                 "▲ **낙관**: 직전 4주 최고 주간 일평균 × 5 | "
