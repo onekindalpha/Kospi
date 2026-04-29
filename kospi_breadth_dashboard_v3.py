@@ -490,6 +490,8 @@ def compute_hlab(df: pd.DataFrame, high_bars: int = 60, low_bars: int = 130) -> 
     L_b = 최근 low_bars 구간 저점
     L_a = 그 이전 low_bars 구간 저점
     """
+    # 0이거나 NaN인 행 제거 (휴장일 이상값이 고점/저점으로 잡히는 방지)
+    df = df[df["close"].notna() & (df["close"].astype(float) > 0)].copy().reset_index(drop=True)
     closes  = df["close"].values.astype(float)
     ad_line = df["ad_line"].values.astype(float)
     dts     = pd.to_datetime(df["date"].astype(str), format="%Y%m%d")
@@ -1504,6 +1506,12 @@ def main():
 
                 # 이번 주 금요일이 아직 안 지났고, 이번 주 일별 데이터가 실제로 있어야만 예상 표시
                 # _this_week_row는 W-FRI 기준이라 지난주 데이터가 섞일 수 있으므로 제외
+                # 이번 주 일별 데이터가 실제로 이번 주 월요일 이후인지 재확인
+                if not _this_week_daily.empty:
+                    _latest_daily_dt = pd.Timestamp(_this_week_daily["dt"].iloc[-1])
+                    if _latest_daily_dt < _this_mon:
+                        _this_week_daily = pd.DataFrame()  # 이번 주 데이터 아니면 무효화
+
                 _this_fri_confirmed = _today > _this_fri or _this_week_daily.empty
                 if not _this_fri_confirmed:
                     # ── 시나리오 3개 ──────────────────────────────────
@@ -1522,16 +1530,18 @@ def main():
                         ("비관", "▼", _s_vals[2], "rgba(255,80,80,0.95)",   "triangle-down",  13),
                     ]
 
-                    # 시나리오 시작점: 오늘(이번 주 현재값) → 금요일 예상
+                    # 시나리오 시작점: 항상 오늘 날짜 기준 (이번 주 → 금요일)
                     _scenario_start_x = _today
                     _scenario_start_y = _current_sum  # 이번 주 누적값
 
-                    # y축 range 동적 계산 (시나리오 최댓값 포함)
+                    # y축 range 동적 계산 (시나리오 최댓값 + 현재값 + 기존 NH-NL 전체 포함)
                     _nhnl_vals = list(pf3["nhnl"].astype(float))
-                    _all_y = _nhnl_vals + _s_vals
+                    # _s_vals + 현재 누적값도 포함해서 마커가 잘리지 않도록
+                    _all_y = _nhnl_vals + _s_vals + [_scenario_start_y]
                     _y_raw_min = min(_all_y)
                     _y_raw_max = max(_all_y)
-                    _y_pad = (_y_raw_max - _y_raw_min) * 0.15
+                    _y_span = max(_y_raw_max - _y_raw_min, 100)
+                    _y_pad = _y_span * 0.25  # 25% 여유 (마커 크기 감안)
                     _y_min = _y_raw_min - _y_pad
                     _y_max = _y_raw_max + _y_pad
 
@@ -1564,6 +1574,18 @@ def main():
 
             if _forecast_error:
                 st.caption(f"⚠ 예상치 계산 오류: {_forecast_error}")
+            # ── [DEBUG] 시나리오 판단 변수 확인 (배포 시 제거)
+            with st.expander("🔍 시나리오 디버그", expanded=False):
+                try:
+                    st.write(f"오늘: {_today} | 이번주 금: {_this_fri} | "
+                             f"this_week_daily 행수: {len(_this_week_daily)} | "
+                             f"_this_fri_confirmed: {_this_fri_confirmed}")
+                    if not _this_fri_confirmed:
+                        st.write(f"시나리오 시작 x: {_scenario_start_x} | 시작 y: {_scenario_start_y}")
+                        st.write(f"낙관: {_s_vals[0]} | 중립: {_s_vals[1]} | 비관: {_s_vals[2]}")
+                        st.write(f"y_min: {_y_min:.0f} | y_max: {_y_max:.0f}")
+                except Exception as _dbg_e:
+                    st.write(f"디버그 오류: {_dbg_e}")
 
             # ── 추세선 헬퍼 (v3 원본) ──────────────────────────────────────
             def _extend_line(dt1, y1, dt2, y2, ext_days=7):
